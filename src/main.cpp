@@ -1,18 +1,33 @@
 #include <Arduino.h>
+#include <LiquidCrystal.h>
 
-// put function declarations here:
-int myFunction(int, int);
+
+//LCD Pin	  Connection	  Uno	        Nano
+///VSS	    GND	          GND header	GND pin
+///VDD	    5V	          5V header	  5V pin
+///RS       D12	          D12	        D12
+///EN	      D11	          D11	        D11
+///D4	      D5	          D5	        D5
+///D5	      D4	          D4	        D4
+///D6	      D3	          D3	        D3
+///D7	      D2	          D2	        D2
+
+// LiquidCrystal(rs, en, d4, d5, d6, d7)
+LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
+
 
 void setup() {
-  // put your setup code here, to run once:
-  int result = myFunction(2, 3);
+    delay(100);         // allow LCD to settle after power-on
+    lcd.begin(16, 2);   // 16 columns, 2 rows
+    lcd.clear();
+
+    lcd.setCursor(0, 0);
+    lcd.print("ViVitro Labs");
+
+    lcd.setCursor(0, 1);
+    lcd.print("Capstone 2026");z
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
 }
 
-// put function definitions here:
-int myFunction(int x, int y) {
-  return x + y;
-}
