@@ -2,17 +2,19 @@
 #include "enc.h"
 #include <LibPrintf.h>
 #include <Encoder.h>
-#include <TMCStepper.h>
+#include "stepper.h"
 
 int prevPos = 0;
 
 Encoder myenc(ENC_CHANNEL_A, ENC_CHANNEL_B);
+stepper linearStepper(5,6);
 
 void setup() {
 
   Serial.begin(9600);
 
-  // int prevA = digitalRead(ENC_CHANNEL_A);
+  linearStepper.enable();
+
 }
 
 void loop() {
@@ -27,5 +29,14 @@ void loop() {
     
     prevPos = newPos;
   }
+
+  int steps;
+
+  if(newPos > prevPos){
+    //going CW?
+
+  }
+
+  // linearStepper.step(1, );
   
 }
