@@ -2,15 +2,13 @@
 #include "enc.h"
 #include <LibPrintf.h>
 #include <Encoder.h>
+#include <TMCStepper.h>
 
 int prevPos = 0;
 
 Encoder myenc(ENC_CHANNEL_A, ENC_CHANNEL_B);
 
 void setup() {
-  // pinMode(ENC_CHANNEL_A, INPUT);
-  // pinMode(ENC_CHANNEL_B, INPUT);
-  // pinMode(ENC_CHANNEL_INDX, INPUT);
 
   Serial.begin(9600);
 
