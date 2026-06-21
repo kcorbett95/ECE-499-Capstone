@@ -1,18 +1,33 @@
 #include <Arduino.h>
+#include "enc.h"
+#include <LibPrintf.h>
+#include <Encoder.h>
 
-// put function declarations here:
-int myFunction(int, int);
+int prevPos = 0;
+
+Encoder myenc(ENC_CHANNEL_A, ENC_CHANNEL_B);
 
 void setup() {
-  // put your setup code here, to run once:
-  int result = myFunction(2, 3);
+  // pinMode(ENC_CHANNEL_A, INPUT);
+  // pinMode(ENC_CHANNEL_B, INPUT);
+  // pinMode(ENC_CHANNEL_INDX, INPUT);
+
+  Serial.begin(9600);
+
+  // int prevA = digitalRead(ENC_CHANNEL_A);
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
-}
 
-// put function definitions here:
-int myFunction(int x, int y) {
-  return x + y;
+  double newPos, revolutions;
+
+  newPos = myenc.read();
+
+  if(newPos != prevPos){
+    revolutions = newPos/(2048.0*4.0);
+    printf("Count: %f\t Revs: %3.1f\n", newPos, revolutions);
+    
+    prevPos = newPos;
+  }
+  
 }
