@@ -27,6 +27,7 @@ void loop() {
 
   newPos = myenc.read();
 
+  //Serial Monitor
   if(newPos != prevPos){
     revolutions = newPos/(RESOLUTION*4.0);
     printf("Count: %f\t Revs: %3.1f\n", newPos, revolutions);
@@ -45,9 +46,9 @@ void loop() {
   }
   else{
     //going CCW?
-    steps = (newPos - prevPos) * ((RESOLUTION*4) / ((ROTATIONS_PER_LAYER * WIRE_D) / LINEAR_RES));
+    steps = abs(newPos - prevPos) * ((RESOLUTION*4) / ((ROTATIONS_PER_LAYER * WIRE_D) / LINEAR_RES));
 
-    linearStepper.step(0,abs(steps));
+    linearStepper.step(0,steps);
   }
 
   // linearStepper.step(1, );
