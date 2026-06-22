@@ -1,18 +1,43 @@
 #include <Arduino.h>
-#include "enc.h"
 #include <LibPrintf.h>
 #include <Encoder.h>
 #include "stepper.h"
 
-long prevPos = 0;
-long issuedSteps = 0;
+/*========== ENCODER =========*/
+/*
+/   Encoder Model: AMT102-V
+/   Pinout:
+/       Blue: B-Channel
+/       Red: +5V
+/       Green: A-Channel
+/       Purple: Index Channel
+/       Black: GND
+/   DIP Settings: 0 0 0 0
+/   Resolution (PPR): 2048/Rotation
+/   
+*/
+#define ENC_CHANNEL_A 2
+#define ENC_CHANNEL_B 3
+#define ENC_CHANNEL_INDX 4
+#define RESOLUTION 2048
 
+Encoder myenc(ENC_CHANNEL_A, ENC_CHANNEL_B);
+/*=============================*/
+
+/*========== DEFINES ==========*/
 #define ROTATIONS_PER_LAYER 23
 #define WIRE_D 0.43
 #define LINEAR_RES 0.00106
 
 #define STEP_PIN 9
 #define DIR_PIN 10
+/*=============================*/
+
+/*========== GLOBALS ==========*/
+int prevPos = 0;
+long prevPos = 0;
+long issuedSteps = 0;
+/*=============================*/
 
 const double STEPS_PER_COUNT = (WIRE_D / LINEAR_RES) / (RESOLUTION * 4.0);
 
