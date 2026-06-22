@@ -5,18 +5,19 @@
 #include <TMCStepper.h>
 #include <LiquidCrystal.h>
 
-//LCD Pin	  Connection	  Uno	        Nano
-///VSS	    GND	          GND header	GND pin
-///VDD	    5V	          5V header	  5V pin
-///RS       D12	          D12	        D12
-///EN	      D11	          D11	        D11
-///D4	      D5	          D5	        D5
-///D5	      D4	          D4	        D4
-///D6	      D3	          D3	        D3
-///D7	      D2	          D2	        D2
+//LCD Pin	  Connection	  Uno/Nano
+///VSS	    GND	          GND
+///VDD	    5V	          5V
+///RS       D12	          D12
+///RW       GND           GND
+///EN	      D11	          D11
+///D4	      D4	          D4
+///D5	      D5	          D5
+///D6	      D6	          D6
+///D7	      D7	          D7
 
 // LiquidCrystal(rs, en, d4, d5, d6, d7)
-LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
+LiquidCrystal lcd(12, 11, 4, 5, 6, 7);
 
 
 int prevPos = 0;
@@ -38,15 +39,14 @@ void setup() {
     delay(2000);
 
     lcd.setCursor(0, 0);
-    lcd.print("N_Turns: ");
+    lcd.print("N_Turns:             ");
 
     lcd.setCursor(0, 1);
-    lcd.print("Count: ");
+    lcd.print("Count:               ");
 
     Serial.begin(9600);
 
-    lcd.setCursor(0, 1);
-    lcd.print("Capstone 2026");z
+
 }
 
 void loop() {
