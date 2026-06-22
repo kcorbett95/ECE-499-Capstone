@@ -27,6 +27,7 @@
 /       10 = 1/64
 /       11 = 1/16
 /   0.01mm linear travel per step
+/   LINEAR_RES 0.00106 measured per MicroStep with MS1/2 = 00
 */
 
 #include <Arduino.h>
@@ -43,7 +44,7 @@ class stepper{
 
     void enable(){
         pinMode(_stepPin, OUTPUT);
-        pinMode(_dirPin, INPUT);
+        pinMode(_dirPin, OUTPUT);
     }
 
     void step(int direction, int num_step){
@@ -51,22 +52,21 @@ class stepper{
         if(direction == 1){
             //Turn CCW?
             //TODO Verify direction of turn for HIGH & LOW on DIR Pin
-            for(int i = 0; i < num_step; i++){
-                digitalWrite(_stepPin, HIGH);
-                delayMicroseconds(160);
-                digitalWrite(_stepPin, LOW);
-                delayMicroseconds(160);
-            }
+            digitalWrite(_dirPin, HIGH);
+            delayMicroseconds(5);
         }
         else{
-            // Turn CW?
+            //Turn CW?
             //TODO Verify direction of turn for HIGH & LOW on DIR Pin
-            for(int i = 0; i < num_step; i++){
-                digitalWrite(_stepPin, HIGH);
-                delayMicroseconds(160);
-                digitalWrite(_stepPin, LOW);
-                delayMicroseconds(160);
-            }
+            digitalWrite(_dirPin, LOW);
+            delayMicroseconds(5);
+        }
+        
+        for(int i = 0; i < num_step; i++){
+            digitalWrite(_stepPin, HIGH);
+            delayMicroseconds(160);
+            digitalWrite(_stepPin, LOW);
+            delayMicroseconds(160);
         }
     }
 
