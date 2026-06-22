@@ -21,7 +21,6 @@
 #define ENC_CHANNEL_INDX 4
 #define RESOLUTION 2048
 
-Encoder myenc(ENC_CHANNEL_A, ENC_CHANNEL_B);
 /*=============================*/
 
 /*========== DEFINES ==========*/
@@ -35,7 +34,6 @@ Encoder myenc(ENC_CHANNEL_A, ENC_CHANNEL_B);
 
 /*========== GLOBALS ==========*/
 int prevPos = 0;
-long prevPos = 0;
 long issuedSteps = 0;
 /*=============================*/
 
