@@ -16,18 +16,17 @@
 /   Resolution (PPR): 2048/Rotation
 /   
 */
+
 #define ENC_CHANNEL_A 2
 #define ENC_CHANNEL_B 3
 #define ENC_CHANNEL_INDX 4
 #define RESOLUTION 2048
-
 /*=============================*/
 
-/*========== DEFINES ==========*/
-#define ROTATIONS_PER_LAYER 23
-#define WIRE_D 0.43
-#define LINEAR_RES 0.00106
-
+/*========== MISC DEFINES ==========*/
+#define ROTATIONS_PER_LAYER 23 //
+#define WIRE_DIAMETER 0.43 //0.43mm
+#define LINEAR_RES 0.00106 //Verified through measurements
 #define STEP_PIN 9
 #define DIR_PIN 10
 /*=============================*/
@@ -35,13 +34,14 @@
 /*========== GLOBALS ==========*/
 int prevPos = 0;
 long issuedSteps = 0;
+const double STEPS_PER_COUNT = (WIRE_DIAMETER / LINEAR_RES) / (RESOLUTION * 4.0);
 /*=============================*/
 
-const double STEPS_PER_COUNT = (WIRE_D / LINEAR_RES) / (RESOLUTION * 4.0);
-
-
-Encoder myenc(ENC_CHANNEL_A, ENC_CHANNEL_B);
+/*========== CLASSES ==========*/
 stepper linearStepper(STEP_PIN,DIR_PIN);
+Encoder myenc(ENC_CHANNEL_A, ENC_CHANNEL_B);
+/*=============================*/
+
 
 void setup() {
 

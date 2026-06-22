@@ -32,8 +32,6 @@
 
 #include <Arduino.h>
 
-//TODO Adjust pin numbers as required
-
 class stepper{
     public:
 
