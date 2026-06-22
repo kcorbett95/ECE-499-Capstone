@@ -17,3 +17,4 @@
 #define ENC_CHANNEL_A 2
 #define ENC_CHANNEL_B 3
 #define ENC_CHANNEL_INDX 4
+#define RESOLUTION 2048

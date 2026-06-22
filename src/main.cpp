@@ -6,6 +6,10 @@
 
 int prevPos = 0;
 
+#define ROTATIONS_PER_LAYER 23
+#define WIRE_D 0.43
+#define LINEAR_RES 0.01
+
 Encoder myenc(ENC_CHANNEL_A, ENC_CHANNEL_B);
 stepper linearStepper(5,6);
 
@@ -24,7 +28,7 @@ void loop() {
   newPos = myenc.read();
 
   if(newPos != prevPos){
-    revolutions = newPos/(2048.0*4.0);
+    revolutions = newPos/(RESOLUTION*4.0);
     printf("Count: %f\t Revs: %3.1f\n", newPos, revolutions);
     
     prevPos = newPos;
@@ -35,6 +39,15 @@ void loop() {
   if(newPos > prevPos){
     //going CW?
 
+    steps = (newPos - prevPos) * ((RESOLUTION*4) / ((ROTATIONS_PER_LAYER * WIRE_D) / LINEAR_RES));
+
+    linearStepper.step(1,steps);
+  }
+  else{
+    //going CCW?
+    steps = (newPos - prevPos) * ((RESOLUTION*4) / ((ROTATIONS_PER_LAYER * WIRE_D) / LINEAR_RES));
+
+    linearStepper.step(0,abs(steps));
   }
 
   // linearStepper.step(1, );
