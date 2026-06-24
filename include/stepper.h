@@ -12,16 +12,16 @@
 /       P5 = CLK (Tie to GND for internal clock)
 /       P6 = STEP (Single Step Pulse)
 /       P7 = DIR (Step Direction)
-/       P8 = VM (Stepper Motor Reference Voltage)
+/       P8 = VM (Stepper Motor Reference Voltage 24V)
 /       P9 = GND
-/       P10 = A2
-/       P11 = A1
-/       P12 = B1
-/       P13 = B2
-/       P14 = A2
+/       P10 = Motor A2
+/       P11 = Motor A1
+/       P12 = Motor B1
+/       P13 = Motor B2
+/       P14 = Motor A2
 /       P15 = VDD   (5V)
 /       P16 = GND
-/   Resolution:
+/   MS1/2 Resolution:
 /       00 = 1/8
 /       01 = 1/32
 /       10 = 1/64
@@ -43,7 +43,7 @@ class stepper{
 
     void enable(){
         pinMode(_stepPin, OUTPUT);
-        pinMode(_dirPin, INPUT);
+        pinMode(_dirPin, OUTPUT);
     }
 
     void step(int direction, int num_step){
