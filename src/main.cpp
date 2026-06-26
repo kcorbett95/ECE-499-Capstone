@@ -27,8 +27,8 @@
 #define ROTATIONS_PER_LAYER 23 //
 #define WIRE_DIAMETER 0.43 //0.43mm
 #define LINEAR_RES 0.00106 //Verified through measurements
-#define STEP_PIN 9
-#define DIR_PIN 10
+#define STEP_PIN 8
+#define DIR_PIN 9
 /*=============================*/
 
 /*========== GLOBALS ==========*/
