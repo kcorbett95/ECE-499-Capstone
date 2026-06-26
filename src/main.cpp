@@ -111,7 +111,7 @@
 #define DIR_PIN         9
 #define ENDSTOP_PIN     A2
 #define HOME_DIR        0       // right to left, toward the endstop
-#define START_POS_MM    15.0    // mm from endstop to winding start position
+#define START_POS_MM    5.0    // mm from endstop to winding start position
 /*=============================*/
 
 /*========== GLOBALS ==========*/
