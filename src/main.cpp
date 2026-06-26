@@ -2,6 +2,7 @@
 #include <LibPrintf.h>
 #include <Encoder.h>
 #include "stepper.h"
+#include <LiquidCrystal.h>
 
 /*========== ENCODER =========*/
 /*
