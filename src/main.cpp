@@ -133,9 +133,10 @@ void loop() {
 
   newPos = myenc.read();
 
+  revolutions = newPos/(RESOLUTION*4.0);
+
   //Serial Monitor
   if(newPos != prevPos){
-    revolutions = newPos/(RESOLUTION*4.0);
     printf("Count: %f\t Revs: %3.1f\n", newPos, revolutions);
     
     prevPos = newPos;
@@ -150,6 +151,7 @@ void loop() {
     linearStepper.step(1, deltaSteps);
     issuedSteps += deltaSteps;
   }
+
   else if(deltaSteps < 0){
     //going CCW?
 
