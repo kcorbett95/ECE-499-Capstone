@@ -46,20 +46,8 @@ class stepper{
     }
 
     void step(int direction, int num_step){
-        
-        if(direction == 1){
-            //Turn CCW?
-            //TODO Verify direction of turn for HIGH & LOW on DIR Pin
-            digitalWrite(_dirPin, HIGH);
-            delayMicroseconds(5);
-        }
-        else{
-            //Turn CW?
-            //TODO Verify direction of turn for HIGH & LOW on DIR Pin
-            digitalWrite(_dirPin, LOW);
-            delayMicroseconds(5);
-        }
-        
+        digitalWrite(_dirPin, direction ? HIGH : LOW);
+        delayMicroseconds(5);
         for(int i = 0; i < num_step; i++){
             digitalWrite(_stepPin, HIGH);
             delayMicroseconds(160);

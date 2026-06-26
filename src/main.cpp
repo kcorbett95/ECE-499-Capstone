@@ -115,9 +115,10 @@
 /*=============================*/
 
 /*========== GLOBALS ==========*/
-int prevPos = 0;
+long prevPos = 0;
 long issuedSteps = 0;
-const double STEPS_PER_COUNT = (WIRE_DIAMETER / LINEAR_RES) / (RESOLUTION * 4.0);
+// Steps for one full traversal pass across the layer width
+const long LAYER_STEPS = lround((double)ROTATIONS_PER_LAYER * WIRE_DIAMETER / LINEAR_RES);
 /*=============================*/
 
 /*========== OBJECTS ==========*/
@@ -192,49 +193,39 @@ void setup() {
 
 void loop() {
 
-  double newPos, revolutions, revolutionsTotal;
-  bool halt;
+    long newPos = myenc.read();
+    double revolutionsTotal = (double)newPos / (RESOLUTION * 4.0);
+    long passNumber = (long)(revolutionsTotal / ROTATIONS_PER_LAYER);
+    double revolutionsInPass = revolutionsTotal - (passNumber * ROTATIONS_PER_LAYER);
 
-  newPos = myenc.read();
-
-  revolutionsTotal = newPos/(RESOLUTION*4.0);
-
-
-  //Serial Monitor
-  if(newPos != prevPos){
-    // printf("Count: %f\t Revs: %3.1f\n", newPos, revolutionsTotal);
-
+    if (newPos != prevPos) {
         char buf[9];
         lcd.setCursor(8, 0);
-        dtostrf(revolutions, 7, 2, buf);
+        dtostrf(revolutionsInPass, 7, 2, buf);
         lcd.print(buf);
 
         lcd.setCursor(7, 1);
-        dtostrf(newPos, 8, 0, buf);
+        dtostrf((double)newPos, 8, 0, buf);
         lcd.print(buf);
+
+        printf("Count: %ld\t Pass: %ld\t Turns: %.2f\n", newPos, passNumber, revolutionsInPass);
 
         prevPos = newPos;
     }
 
-    long targetSteps = lround(newPos * STEPS_PER_COUNT);
+    // Steps completed within the current pass
+    long stepsInPass = lround(revolutionsInPass * WIRE_DIAMETER / LINEAR_RES);
+
+    // Even pass: traverse forward; odd pass: traverse in reverse
+    long targetSteps = (passNumber % 2 == 0) ? stepsInPass : (LAYER_STEPS - stepsInPass);
     long deltaSteps = targetSteps - issuedSteps;
 
-  if(deltaSteps > 0){
-
-    long passNumber = (long)(revolutionsTotal / ROTATIONS_PER_LAYER);
-
-    // if((passNumber % 2) == 0 && halt == false){
-    if((passNumber % 2) == 0){
-      //going RtL
-      printf("RtL:\tRevolutions: %f #PassesDone: %d\tHalt: %d \n", revolutions, passNumber, halt);
-      linearStepper.step(1, deltaSteps);
-      issuedSteps += deltaSteps;
-    }
-    else{
-      //going LtR
-      printf("LtR:\tRevolutions: %f #PassesDone: %d\tHalt: %d \n", revolutions, passNumber, halt);
-      linearStepper.step(1, -deltaSteps);
-      issuedSteps += deltaSteps;
+    if (deltaSteps > 0) {
+        linearStepper.step(1, deltaSteps);
+        issuedSteps += deltaSteps;
+    } else if (deltaSteps < 0) {
+        linearStepper.step(0, -deltaSteps);
+        issuedSteps += deltaSteps;
     }
 
     // if(revolutions % 23 == 0){
@@ -249,5 +240,4 @@ void loop() {
     //   revolutions = 0;
     //   halt = false;
     // } 
-  }
 }
