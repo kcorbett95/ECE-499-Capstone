@@ -192,13 +192,17 @@ void setup() {
 
 void loop() {
 
-    double newPos, revolutions;
+  double newPos, revolutions, revolutionsTotal;
+  bool halt;
 
-    newPos = myenc.read();
-    revolutions = newPos / (RESOLUTION * 4.0);
+  newPos = myenc.read();
 
-    if (newPos != prevPos) {
-        printf("Count: %f\t Revs: %3.1f\n", newPos, revolutions);
+  revolutionsTotal = newPos/(RESOLUTION*4.0);
+
+
+  //Serial Monitor
+  if(newPos != prevPos){
+    // printf("Count: %f\t Revs: %3.1f\n", newPos, revolutionsTotal);
 
         char buf[9];
         lcd.setCursor(8, 0);
@@ -215,12 +219,35 @@ void loop() {
     long targetSteps = lround(newPos * STEPS_PER_COUNT);
     long deltaSteps = targetSteps - issuedSteps;
 
-    if (deltaSteps > 0) {
-        linearStepper.step(1, deltaSteps);
-        issuedSteps += deltaSteps;
+  if(deltaSteps > 0){
+
+    long passNumber = (long)(revolutionsTotal / ROTATIONS_PER_LAYER);
+
+    // if((passNumber % 2) == 0 && halt == false){
+    if((passNumber % 2) == 0){
+      //going RtL
+      printf("RtL:\tRevolutions: %f #PassesDone: %d\tHalt: %d \n", revolutions, passNumber, halt);
+      linearStepper.step(1, deltaSteps);
+      issuedSteps += deltaSteps;
     }
-    else if (deltaSteps < 0) {
-        linearStepper.step(0, -deltaSteps);
-        issuedSteps += deltaSteps;
+    else{
+      //going LtR
+      printf("LtR:\tRevolutions: %f #PassesDone: %d\tHalt: %d \n", revolutions, passNumber, halt);
+      linearStepper.step(1, -deltaSteps);
+      issuedSteps += deltaSteps;
     }
+
+    // if(revolutions % 23 == 0){
+    //   printf("Revolutions between 23 & 23.5 and halt false\n");
+    //   passesDone++; //23 revolutions per pass
+    //   halt = true; //Stop linear drive
+    //   revolutions = 0;
+    // }
+    
+    // if(revolutions >=0 && revolutions < 0.5 && halt == true){
+    //   printf("Revolutions between 0 and 0.5 and halt true\n");
+    //   revolutions = 0;
+    //   halt = false;
+    // } 
+  }
 }
