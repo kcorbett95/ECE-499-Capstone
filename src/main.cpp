@@ -3,6 +3,8 @@
 #include <Encoder.h>
 #include "stepper.h"
 #include <LiquidCrystal.h>
+#include <AceButton.h>
+#include <math.h>
 
 /*
  * =============================================================================
@@ -47,7 +49,7 @@
  *  VM         24V              Motor power supply
  *  GND        GND              Common with 24V supply GND
  *
- * TMC2209 Stepper Driver #2
+ * TMC2209 Stepper Driver #2 (Rotary Axis)
  * ---------------------------------------------------------------------------
  *  Signal     Nano Pin         Notes
  *  ------     --------         -----
@@ -69,14 +71,14 @@
  *  ----       ------           ----------  -----
  *  Brown      +24V             24V supply
  *  Blue       0V / GND         GND         Common with Arduino GND
- *  Black      NPN output       A2          INPUT_PULLUP; LOW = tripped
+ *  Black      NPN output       A3          INPUT_PULLUP; LOW = tripped
  *
  * Jog Buttons (momentary NO, one side to GND)
  * ---------------------------------------------------------------------------
  *  Button     Nano Pin         Notes
  *  ------     --------         -----
  *  Jog CW     A0               INPUT_PULLUP; LOW = pressed
- *  Jog CCW    A1               INPUT_PULLUP; LOW = pressed
+ *  Jog CCW    A2               INPUT_PULLUP; LOW = pressed
  *
  * Reset Button
  * ---------------------------------------------------------------------------
@@ -107,22 +109,32 @@
 #define ROTATIONS_PER_LAYER 23
 #define WIRE_DIAMETER   0.43    // mm
 #define LINEAR_RES      0.00106 // mm per microstep, verified by measurement
-#define STEP_PIN        8
-#define DIR_PIN         9
-#define ENDSTOP_PIN     A2
+#define LINEAR_STEP_PIN        8
+#define LINEAR_DIR_PIN         9
+#define ROTARY_STEP_PIN        10
+#define ROTARY_DIR_PIN         13
+#define ENDSTOP_PIN     A3
 #define HOME_DIR        0       // right to left, toward the endstop
-#define START_POS_MM    5.0    // mm from endstop to winding start position
+#define START_POS_MM    5.5    // mm from endstop to winding start position
+#define START_RIGHT_SHIFT_MM 6  //Starting shift to the right
+#define JOG_RIGHT_BTN_PIN   A2
+#define JOG_LEFT_BTN_PIN   A0
+#define LEAD_LAG_COMP 0.3       //Half of a rotation buffer at each end
 /*=============================*/
 
 /*========== GLOBALS ==========*/
 long prevPos = 0;
 long issuedSteps = 0;
+long targetSteps = 0;
+bool atEndFlag = false;
 // Steps for one full traversal pass across the layer width
 const long LAYER_STEPS = lround((double)ROTATIONS_PER_LAYER * WIRE_DIAMETER / LINEAR_RES);
+// const long LINEAR_DIST_COMP = lround((WIRE_DIAMETER / LINEAR_RES) * LEAD_LAG_COMP);
 /*=============================*/
 
 /*========== OBJECTS ==========*/
-stepper linearStepper(STEP_PIN, DIR_PIN);
+stepper linearStepper(LINEAR_STEP_PIN, LINEAR_DIR_PIN);
+// stepper rotaryStepper(ROTARY_DIR_PIN, ROTARY_STEP_PIN);
 Encoder myenc(ENC_CHANNEL_A, ENC_CHANNEL_B);
 // LiquidCrystal(rs, en, d4, d5, d6, d7)
 LiquidCrystal lcd(12, 11, 4, 5, 6, 7);
@@ -139,6 +151,9 @@ void home() {
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Homing...");
+
+    //Move carriage to the right by 6mm to ensure it doesnt hit the left most limit
+    linearStepper.step(1, (int)(START_POS_MM / LINEAR_RES));
 
     while (digitalRead(ENDSTOP_PIN) == HIGH && steps < MAX_HOME_STEPS) {
         linearStepper.step(HOME_DIR, 1);
@@ -182,7 +197,7 @@ void setup() {
     linearStepper.enable();
 
     pinMode(ENDSTOP_PIN, INPUT_PULLUP);
-    home();
+    home(); //Homes the linear drive carrage
 
     lcd.clear();
     lcd.setCursor(0, 0);
@@ -195,38 +210,73 @@ void loop() {
 
     long newPos = myenc.read();
     double revolutionsTotal = (double)newPos / (RESOLUTION * 4.0);
-    long passNumber = (long)(revolutionsTotal / ROTATIONS_PER_LAYER);
+    int passNumber = floor((int)(revolutionsTotal / ROTATIONS_PER_LAYER));  //Rounds Down Always
     double revolutionsInPass = revolutionsTotal - (passNumber * ROTATIONS_PER_LAYER);
 
     if (newPos != prevPos) {
         char buf[9];
         lcd.setCursor(8, 0);
-        dtostrf(revolutionsInPass, 7, 2, buf);
+        dtostrf(revolutionsTotal, 7, 2, buf);
         lcd.print(buf);
 
         lcd.setCursor(7, 1);
         dtostrf((double)newPos, 8, 0, buf);
         lcd.print(buf);
 
-        printf("Count: %ld\t Pass: %ld\t Turns: %.2f\n", newPos, passNumber, revolutionsInPass);
+        printf("Count: %ld\t Pass: %ld\t Turns: %.2f\n", newPos, passNumber, revolutionsTotal);
 
         prevPos = newPos;
     }
 
+    if((int)revolutionsTotal == 23){
+        atEndFlag == true;
+    }
+
     // Steps completed within the current pass
     long stepsInPass = lround(revolutionsInPass * WIRE_DIAMETER / LINEAR_RES);
+    // long steps = lround(revolutionsTotal * WIRE_DIAMETER / LINEAR_RES);
 
     // Even pass: traverse forward; odd pass: traverse in reverse
-    long targetSteps = (passNumber % 2 == 0) ? stepsInPass : (LAYER_STEPS - stepsInPass);
-    long deltaSteps = targetSteps - issuedSteps;
+    // long targetSteps = (passNumber % 2 == 0) ? stepsInPass : (LAYER_STEPS - stepsInPass);
+    
+    int tempRevolutionTotal = revolutionsTotal;
 
-    if (deltaSteps > 0) {
-        linearStepper.step(1, deltaSteps);
-        issuedSteps += deltaSteps;
-    } else if (deltaSteps < 0) {
-        linearStepper.step(0, -deltaSteps);
-        issuedSteps += deltaSteps;
+    if(((int)revolutionsTotal % 23) != 0 && atEndFlag == false){
+        //Not at either end of bobbin
+        if(passNumber % 2 == 0){
+        // targetSteps = steps;
+            targetSteps = stepsInPass;
+        }
+        else{
+            // targetSteps = (LAYER_STEPS - steps);
+            targetSteps = (LAYER_STEPS - stepsInPass);
+        }
+
+        //Want deltaSteps to be 0
+        long deltaSteps = targetSteps - issuedSteps;
+
+        if(atEndFlag == false){
+            if (deltaSteps > 0) {
+                // linearStepper.step(1, deltaSteps + LINEAR_DIST_COMP);
+                linearStepper.step(1, deltaSteps);
+                issuedSteps += deltaSteps;
+            } else if (deltaSteps < 0) {
+                // linearStepper.step(0, -(deltaSteps + LINEAR_DIST_COMP));
+                linearStepper.step(0, -deltaSteps);
+                issuedSteps += deltaSteps;
+            }
+        }
+        else if(revolutionsTotal > (tempRevolutionTotal + LEAD_LAG_COMP)){
+            atEndFlag = false;
+        }
     }
+    else{
+        if(revolutionsTotal > (tempRevolutionTotal + LEAD_LAG_COMP)){
+            atEndFlag = false;
+        }
+    }
+
+    
 
     // if(revolutions % 23 == 0){
     //   printf("Revolutions between 23 & 23.5 and halt false\n");
