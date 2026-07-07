@@ -6,6 +6,8 @@
 #include <AceButton.h>
 #include <math.h>
 
+using namespace ace_button;
+
 /*
  * =============================================================================
  * ARDUINO NANO PIN CONNECTION TABLE
@@ -115,11 +117,13 @@
 #define ROTARY_DIR_PIN         13
 #define ENDSTOP_PIN     A3
 #define HOME_DIR        0       // right to left, toward the endstop
-#define START_POS_MM    5.3    // mm from endstop to winding start position
+#define START_POS_MM    5.5    // mm from endstop to winding start position
 #define START_RIGHT_SHIFT_MM 6  //Starting shift to the right
 #define JOG_RIGHT_BTN_PIN   A2
-#define JOG_LEFT_BTN_PIN   A0
-#define LEAD_LAG_COMP 0.3       //Half of a rotation buffer at each end
+#define JOG_LEFT_BTN_PIN    A0
+#define JOG_MM              0.5      // mm to move per button press
+#define END_JOG_MM          .645     // mm to retract from bobbin end when pass boundary is hit
+#define LEAD_LAG_COMP       0.43     //Half of a rotation buffer at each end
 /*=============================*/
 
 /*========== GLOBALS ==========*/
@@ -139,6 +143,8 @@ stepper linearStepper(LINEAR_STEP_PIN, LINEAR_DIR_PIN);
 Encoder myenc(ENC_CHANNEL_A, ENC_CHANNEL_B);
 // LiquidCrystal(rs, en, d4, d5, d6, d7)
 LiquidCrystal lcd(12, 11, 4, 5, 6, 7);
+AceButton jogRightBtn(JOG_RIGHT_BTN_PIN);
+AceButton jogLeftBtn(JOG_LEFT_BTN_PIN);
 /*=============================*/
 
 // Drives linearStepper toward the endstop, backs off until the switch
@@ -182,6 +188,23 @@ void home() {
     prevPos = 0;
 }
 
+void jogBtn(int direction, int num_steps) {
+    linearStepper.step(direction, num_steps);
+    // Reset issuedSteps to targetSteps so deltaSteps = 0 on the next loop
+    // iteration. The winding loop then sees no error and issues no correction
+    // steps — the motor holds its new jogged position.
+    issuedSteps = targetSteps;
+}
+
+void handleJogEvent(AceButton* button, uint8_t eventType, uint8_t /*buttonState*/) {
+    if (eventType != AceButton::kEventPressed) return;
+    if (button->getPin() == JOG_RIGHT_BTN_PIN) {
+        jogBtn(0, lround(JOG_MM / LINEAR_RES));
+    } else if (button->getPin() == JOG_LEFT_BTN_PIN) {
+        jogBtn(1, lround(JOG_MM / LINEAR_RES));
+    }
+}
+
 void setup() {
 
     delay(100);
@@ -198,6 +221,10 @@ void setup() {
     linearStepper.enable();
 
     pinMode(ENDSTOP_PIN, INPUT_PULLUP);
+    pinMode(JOG_RIGHT_BTN_PIN, INPUT_PULLUP);
+    pinMode(JOG_LEFT_BTN_PIN, INPUT_PULLUP);
+    ButtonConfig::getSystemButtonConfig()->setEventHandler(handleJogEvent);
+
     home(); //Homes the linear drive carrage
 
     lcd.clear();
@@ -207,12 +234,10 @@ void setup() {
     lcd.print("Count:               ");
 }
 
-void jogBtn(int direction, int num_steps) {
-    linearStepper.step(direction, num_steps);
-    issuedSteps += (direction == 1) ? num_steps : -num_steps;
-}
-
 void loop() {
+
+    jogRightBtn.check();
+    jogLeftBtn.check();
 
     long newPos = myenc.read();
     double revolutionsTotal = (double)newPos / (RESOLUTION * 4.0);
@@ -244,6 +269,12 @@ void loop() {
     if (!atEndFlag && passNumber > 0 && revolutionsInPass < LEAD_LAG_COMP) {
         atEndFlag = true;
         endFlagTriggerRevs = passNumber * ROTATIONS_PER_LAYER;
+        // Retract from the bobbin end before waiting for LEAD_LAG_COMP turns.
+        // Direction is opposite to the pass just completed:
+        //   even pass = forward (dir 1), so retract backward (dir 0)
+        //   odd pass  = backward (dir 0), so retract forward (dir 1)
+        int retractDir = (passNumber % 2 == 0) ? 1 : 0;
+        linearStepper.step(retractDir, lround(END_JOG_MM / LINEAR_RES));
     }
 
     // Resume once LEAD_LAG_COMP rotations have elapsed past the boundary.
