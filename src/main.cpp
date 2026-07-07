@@ -115,7 +115,7 @@
 #define ROTARY_DIR_PIN         13
 #define ENDSTOP_PIN     A3
 #define HOME_DIR        0       // right to left, toward the endstop
-#define START_POS_MM    5.5    // mm from endstop to winding start position
+#define START_POS_MM    5.3    // mm from endstop to winding start position
 #define START_RIGHT_SHIFT_MM 6  //Starting shift to the right
 #define JOG_RIGHT_BTN_PIN   A2
 #define JOG_LEFT_BTN_PIN   A0
@@ -127,6 +127,7 @@ long prevPos = 0;
 long issuedSteps = 0;
 long targetSteps = 0;
 bool atEndFlag = false;
+double endFlagTriggerRevs = 0;
 // Steps for one full traversal pass across the layer width
 const long LAYER_STEPS = lround((double)ROTATIONS_PER_LAYER * WIRE_DIAMETER / LINEAR_RES);
 // const long LINEAR_DIST_COMP = lround((WIRE_DIAMETER / LINEAR_RES) * LEAD_LAG_COMP);
@@ -206,6 +207,11 @@ void setup() {
     lcd.print("Count:               ");
 }
 
+void jogBtn(int direction, int num_steps) {
+    linearStepper.step(direction, num_steps);
+    issuedSteps += (direction == 1) ? num_steps : -num_steps;
+}
+
 void loop() {
 
     long newPos = myenc.read();
@@ -228,66 +234,46 @@ void loop() {
         prevPos = newPos;
     }
 
-    if((int)revolutionsTotal == 23){
-        atEndFlag == true;
+    // Linear steps completed within the current pass
+    long stepsInPass = lround(revolutionsInPass * WIRE_DIAMETER / LINEAR_RES);
+
+    // At each pass boundary, pause linear motion for LEAD_LAG_COMP rotations.
+    // Triggered by entering the first LEAD_LAG_COMP rotations of any new pass (passNumber > 0).
+    // endFlagTriggerRevs stores the exact revolution count at the boundary so the
+    // resume condition is evaluated against a fixed reference, not a moving target.
+    if (!atEndFlag && passNumber > 0 && revolutionsInPass < LEAD_LAG_COMP) {
+        atEndFlag = true;
+        endFlagTriggerRevs = passNumber * ROTATIONS_PER_LAYER;
     }
 
-    // Steps completed within the current pass
-    long stepsInPass = lround(revolutionsInPass * WIRE_DIAMETER / LINEAR_RES);
-    // long steps = lround(revolutionsTotal * WIRE_DIAMETER / LINEAR_RES);
-
-    // Even pass: traverse forward; odd pass: traverse in reverse
-    // long targetSteps = (passNumber % 2 == 0) ? stepsInPass : (LAYER_STEPS - stepsInPass);
-    
-    int tempRevolutionTotal = revolutionsTotal;
-
-    if(((int)revolutionsTotal % 23) != 0 && atEndFlag == false){
-        //Not at either end of bobbin
-        if(passNumber % 2 == 0){
-        // targetSteps = steps;
-            targetSteps = stepsInPass;
+    // Resume once LEAD_LAG_COMP rotations have elapsed past the boundary.
+    // Sync issuedSteps to the current encoder position so deltaSteps = 0
+    // at the moment of resumption — no catch-up jump.
+    if (atEndFlag && revolutionsTotal >= endFlagTriggerRevs + LEAD_LAG_COMP) {
+        atEndFlag = false;
+        if (passNumber % 2 == 0) {
+            issuedSteps = stepsInPass;
+        } else {
+            issuedSteps = LAYER_STEPS - stepsInPass;
         }
-        else{
-            // targetSteps = (LAYER_STEPS - steps);
+    }
+
+    if (!atEndFlag) {
+        // Even pass: traverse forward; odd pass: traverse in reverse
+        if (passNumber % 2 == 0) {
+            targetSteps = stepsInPass;
+        } else {
             targetSteps = (LAYER_STEPS - stepsInPass);
         }
 
-        //Want deltaSteps to be 0
+        // Issue only the new steps needed to reach targetSteps
         long deltaSteps = targetSteps - issuedSteps;
-
-        if(atEndFlag == false){
-            if (deltaSteps > 0) {
-                // linearStepper.step(1, deltaSteps + LINEAR_DIST_COMP);
-                linearStepper.step(1, deltaSteps);
-                issuedSteps += deltaSteps;
-            } else if (deltaSteps < 0) {
-                // linearStepper.step(0, -(deltaSteps + LINEAR_DIST_COMP));
-                linearStepper.step(0, -deltaSteps);
-                issuedSteps += deltaSteps;
-            }
-        }
-        else if(revolutionsTotal > (tempRevolutionTotal + LEAD_LAG_COMP)){
-            atEndFlag = false;
+        if (deltaSteps > 0) {
+            linearStepper.step(1, deltaSteps);
+            issuedSteps += deltaSteps;
+        } else if (deltaSteps < 0) {
+            linearStepper.step(0, -deltaSteps);
+            issuedSteps += deltaSteps;
         }
     }
-    else{
-        if(revolutionsTotal > (tempRevolutionTotal + LEAD_LAG_COMP)){
-            atEndFlag = false;
-        }
-    }
-
-    
-
-    // if(revolutions % 23 == 0){
-    //   printf("Revolutions between 23 & 23.5 and halt false\n");
-    //   passesDone++; //23 revolutions per pass
-    //   halt = true; //Stop linear drive
-    //   revolutions = 0;
-    // }
-    
-    // if(revolutions >=0 && revolutions < 0.5 && halt == true){
-    //   printf("Revolutions between 0 and 0.5 and halt true\n");
-    //   revolutions = 0;
-    //   halt = false;
-    // } 
 }
