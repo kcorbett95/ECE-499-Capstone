@@ -5,6 +5,7 @@
 #include <LiquidCrystal.h>
 #include <AceButton.h>
 #include <math.h>
+#include <AccelStepper.h>
 
 using namespace ace_button;
 
@@ -109,7 +110,7 @@ using namespace ace_button;
 
 /*========== MISC DEFINES ==========*/
 #define ROTATIONS_PER_LAYER 23
-#define WIRE_DIAMETER   0.43    // mm
+#define WIRE_DIAMETER   0.41    // mm
 #define LINEAR_RES      0.00106 // mm per microstep, verified by measurement
 #define LINEAR_STEP_PIN        8
 #define LINEAR_DIR_PIN         9
@@ -117,13 +118,15 @@ using namespace ace_button;
 #define ROTARY_DIR_PIN         13
 #define ENDSTOP_PIN     A3
 #define HOME_DIR        0       // right to left, toward the endstop
-#define START_POS_MM    5.5    // mm from endstop to winding start position
+#define START_POS_MM    7.8    // mm from endstop to winding start position
 #define START_RIGHT_SHIFT_MM 6  //Starting shift to the right
 #define JOG_RIGHT_BTN_PIN   A2
 #define JOG_LEFT_BTN_PIN    A0
 #define JOG_MM              0.5      // mm to move per button press
-#define END_JOG_MM          .645     // mm to retract from bobbin end when pass boundary is hit
+#define END_JOG_MM          .86     // mm to retract from bobbin end when pass boundary is hit
 #define LEAD_LAG_COMP       0.43     //Half of a rotation buffer at each end
+#define LINEAR_MAX_SPEED      10000     //Steps per second
+#define LINEAR_ACCELERATION     5000      //Steps per second per second
 /*=============================*/
 
 /*========== GLOBALS ==========*/
@@ -138,7 +141,8 @@ const long LAYER_STEPS = lround((double)ROTATIONS_PER_LAYER * WIRE_DIAMETER / LI
 /*=============================*/
 
 /*========== OBJECTS ==========*/
-stepper linearStepper(LINEAR_STEP_PIN, LINEAR_DIR_PIN);
+// stepper linearStepper(LINEAR_STEP_PIN, LINEAR_DIR_PIN);  //OLD DEFINITION
+AccelStepper LinearStepper(AccelStepper::DRIVER, LINEAR_STEP_PIN, LINEAR_DIR_PIN);
 // stepper rotaryStepper(ROTARY_DIR_PIN, ROTARY_STEP_PIN);
 Encoder myenc(ENC_CHANNEL_A, ENC_CHANNEL_B);
 // LiquidCrystal(rs, en, d4, d5, d6, d7)
@@ -159,13 +163,20 @@ void home() {
     lcd.setCursor(0, 0);
     lcd.print("Homing...");
 
-    //Move carriage to the right by 6mm to ensure it doesnt hit the left most limit
-    linearStepper.step(1, (int)(START_POS_MM / LINEAR_RES));
-
-    while (digitalRead(ENDSTOP_PIN) == HIGH && steps < MAX_HOME_STEPS) {
-        linearStepper.step(HOME_DIR, 1);
-        steps++;
+    //Move carriage to the right until it is outside the beam
+    while(digitalRead(ENDSTOP_PIN) == LOW){
+        LinearStepper.move(1000);
+        LinearStepper.run();
     }
+    LinearStepper.stop();
+
+    //Move carriage to the left until it is outside the beam
+    while(digitalRead(ENDSTOP_PIN) == HIGH){
+        LinearStepper.move(-1000);
+        LinearStepper.run();
+    }
+    LinearStepper.stop();   //Stop once home has bit reached
+    LinearStepper.setCurrentPosition(0);    //Temporary home position
 
     if (steps >= MAX_HOME_STEPS) {
         lcd.clear();
@@ -174,22 +185,28 @@ void home() {
         while (true);
     }
 
-    // Back off until switch releases
-    while (digitalRead(ENDSTOP_PIN) == LOW) {
-        linearStepper.step(!HOME_DIR, 1);
-    }
-
     // Move to winding start position, then zero tracking
-    long startSteps = lround(START_POS_MM / LINEAR_RES);
-    linearStepper.step(!HOME_DIR, startSteps);
+    long startPositionSteps = lround(START_POS_MM / LINEAR_RES);
+    LinearStepper.runToNewPosition(startPositionSteps);
 
     issuedSteps = 0;
     myenc.write(0);
     prevPos = 0;
+    LinearStepper.setCurrentPosition(0);    //Sets current position to position 0. Final Reference point.
 }
 
 void jogBtn(int direction, int num_steps) {
-    linearStepper.step(direction, num_steps);
+    // linearStepper.step(direction, num_steps);    //! Old Implementation
+    int currentPosTemp = LinearStepper.currentPosition();
+    LinearStepper.move(direction * num_steps);
+    LinearStepper.setAcceleration(LINEAR_ACCELERATION*4);
+    while(currentPosTemp != LinearStepper.currentPosition() + num_steps){
+        LinearStepper.run();
+        printf("Stepper Stepping - BTN Press\n");
+    }
+    LinearStepper.stop();
+    printf("Stepper Stopped - BTN Press\n");
+    LinearStepper.setAcceleration(LINEAR_ACCELERATION);
     // Reset issuedSteps to targetSteps so deltaSteps = 0 on the next loop
     // iteration. The winding loop then sees no error and issues no correction
     // steps — the motor holds its new jogged position.
@@ -199,9 +216,9 @@ void jogBtn(int direction, int num_steps) {
 void handleJogEvent(AceButton* button, uint8_t eventType, uint8_t /*buttonState*/) {
     if (eventType != AceButton::kEventPressed) return;
     if (button->getPin() == JOG_RIGHT_BTN_PIN) {
-        jogBtn(0, lround(JOG_MM / LINEAR_RES));
-    } else if (button->getPin() == JOG_LEFT_BTN_PIN) {
         jogBtn(1, lround(JOG_MM / LINEAR_RES));
+    } else if (button->getPin() == JOG_LEFT_BTN_PIN) {
+        jogBtn(-1, lround(JOG_MM / LINEAR_RES));
     }
 }
 
@@ -218,7 +235,9 @@ void setup() {
     delay(2000);
 
     Serial.begin(9600);
-    linearStepper.enable();
+
+    LinearStepper.setMaxSpeed(LINEAR_MAX_SPEED);
+    LinearStepper.setAcceleration(LINEAR_ACCELERATION);
 
     pinMode(ENDSTOP_PIN, INPUT_PULLUP);
     pinMode(JOG_RIGHT_BTN_PIN, INPUT_PULLUP);
@@ -239,9 +258,11 @@ void loop() {
     jogRightBtn.check();
     jogLeftBtn.check();
 
+    LinearStepper.run();
+
     long newPos = myenc.read();
     double revolutionsTotal = (double)newPos / (RESOLUTION * 4.0);
-    int passNumber = floor((int)(revolutionsTotal / ROTATIONS_PER_LAYER));  //Rounds Down Always
+    int passNumber = (int)(revolutionsTotal / ROTATIONS_PER_LAYER);  //Rounds Down Always
     double revolutionsInPass = revolutionsTotal - (passNumber * ROTATIONS_PER_LAYER);
 
     if (newPos != prevPos) {
@@ -273,8 +294,9 @@ void loop() {
         // Direction is opposite to the pass just completed:
         //   even pass = forward (dir 1), so retract backward (dir 0)
         //   odd pass  = backward (dir 0), so retract forward (dir 1)
-        int retractDir = (passNumber % 2 == 0) ? 1 : 0;
-        linearStepper.step(retractDir, lround(END_JOG_MM / LINEAR_RES));
+        int retractDir = (passNumber % 2 == 0) ? -1 : 1;
+        // linearStepper.step(retractDir, lround(END_JOG_MM / LINEAR_RES));
+        LinearStepper.move(retractDir * lround(END_JOG_MM / LINEAR_RES));
     }
 
     // Resume once LEAD_LAG_COMP rotations have elapsed past the boundary.
@@ -300,10 +322,10 @@ void loop() {
         // Issue only the new steps needed to reach targetSteps
         long deltaSteps = targetSteps - issuedSteps;
         if (deltaSteps > 0) {
-            linearStepper.step(1, deltaSteps);
+            // linearStepper.step(1, deltaSteps);
             issuedSteps += deltaSteps;
         } else if (deltaSteps < 0) {
-            linearStepper.step(0, -deltaSteps);
+            // linearStepper.step(0, -deltaSteps);
             issuedSteps += deltaSteps;
         }
     }
