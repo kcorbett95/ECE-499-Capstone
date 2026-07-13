@@ -58,7 +58,7 @@ using namespace ace_button;
  *  ------     --------         -----
  *  STEP       D10
  *  DIR        D13              Shares onboard LED
- *  EN         GND              Tied low = always enabled
+ *  EN         A4               LOW = enabled/holding, HIGH = disabled/free-spinning
  *  CLK        GND              Tied low = internal clock
  *  VDD        5V               Logic supply
  *  VM         24V              Motor power supply
@@ -116,6 +116,7 @@ using namespace ace_button;
 #define LINEAR_DIR_PIN         9
 #define ROTARY_STEP_PIN        10
 #define ROTARY_DIR_PIN         13
+#define ROTARY_EN_PIN           A4     // TMC2209 #2 EN: LOW = enabled/holding, HIGH = disabled/free-spinning
 #define ENDSTOP_PIN     A3
 #define HOME_DIR        0       // right to left, toward the endstop
 #define START_POS_MM    7.8    // mm from endstop to winding start position
@@ -127,8 +128,8 @@ using namespace ace_button;
 #define LEAD_LAG_COMP       0.43     //Half of a rotation buffer at each end
 #define LINEAR_MAX_SPEED      10000     //Steps per second
 #define LINEAR_ACCELERATION     10000      //Steps per second per second
-#define ROTARY_MAX_SPEED        5000     //Steps per second, tune to desired winding RPM
-#define ROTARY_ACCELERATION     5000     //Steps per second per second, soft start/stop ramp
+#define ROTARY_MAX_SPEED        15000     //Steps per second, tune to desired winding RPM
+#define ROTARY_ACCELERATION     10000     //Steps per second per second, soft start/stop ramp
 #define ROTARY_RUN_DIRECTION       1     //1 or -1, tune to match desired winding direction
 #define WINDING_TARGET_TURNS      91.5   //Total encoder turns to wind before auto-stopping
 /*=============================*/
@@ -196,6 +197,7 @@ void pumpRotary() {
     RotaryStepper.run();
 
     if (windingState == WIND_STOPPING && !RotaryStepper.isRunning()) {
+        digitalWrite(ROTARY_EN_PIN, HIGH);   // fully stopped: disable driver, free-spin
         windingState = WIND_IDLE;
     }
 }
@@ -205,6 +207,7 @@ void pumpRotary() {
 // AccelStepper's own ramp rather than an instant halt.
 void toggleWinding() {
     if (windingState == WIND_IDLE) {
+        digitalWrite(ROTARY_EN_PIN, LOW);    // enable driver before commanding motion
         RotaryStepper.setCurrentPosition(0);
         RotaryStepper.move(ROTARY_RUN_DIRECTION * 2000000000L);
         windingState = WIND_RUNNING;
@@ -311,6 +314,8 @@ void setup() {
     pinMode(ENDSTOP_PIN, INPUT_PULLUP);
     pinMode(JOG_RIGHT_BTN_PIN, INPUT_PULLUP);
     pinMode(JOG_LEFT_BTN_PIN, INPUT_PULLUP);
+    pinMode(ROTARY_EN_PIN, OUTPUT);
+    digitalWrite(ROTARY_EN_PIN, HIGH);   // start disabled: free-spinning, no holding torque
     ButtonConfig::getSystemButtonConfig()->setEventHandler(handleJogEvent);
 
     home(); //Homes the linear drive carrage
