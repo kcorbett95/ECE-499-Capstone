@@ -120,13 +120,16 @@ using namespace ace_button;
 #define HOME_DIR        0       // right to left, toward the endstop
 #define START_POS_MM    7.8    // mm from endstop to winding start position
 #define START_RIGHT_SHIFT_MM 6  //Starting shift to the right
-#define JOG_RIGHT_BTN_PIN   A2
+#define JOG_RIGHT_BTN_PIN   A2  // A1 pin is broken on the Nano board
 #define JOG_LEFT_BTN_PIN    A0
 #define JOG_MM              0.5      // mm to move per button press
 #define END_JOG_MM          .86     // mm to retract from bobbin end when pass boundary is hit
 #define LEAD_LAG_COMP       0.43     //Half of a rotation buffer at each end
 #define LINEAR_MAX_SPEED      10000     //Steps per second
 #define LINEAR_ACCELERATION     5000      //Steps per second per second
+#define ROTARY_MAX_SPEED        2000     //Steps per second, tune to desired winding RPM
+#define ROTARY_ACCELERATION     2000     //Steps per second per second, soft start/stop ramp
+#define ROTARY_RUN_DIRECTION       1     //1 or -1, tune to match desired winding direction
 /*=============================*/
 
 /*========== GLOBALS ==========*/
@@ -138,18 +141,59 @@ double endFlagTriggerRevs = 0;
 // Steps for one full traversal pass across the layer width
 const long LAYER_STEPS = lround((double)ROTATIONS_PER_LAYER * WIRE_DIAMETER / LINEAR_RES);
 // const long LINEAR_DIST_COMP = lround((WIRE_DIAMETER / LINEAR_RES) * LEAD_LAG_COMP);
+
+// Rotary drive state: IDLE (not moving) -> RUNNING (spinning, button-started) ->
+// STOPPING (decelerating) -> back to IDLE once fully stopped.
+enum WindingState { WIND_IDLE, WIND_RUNNING, WIND_STOPPING };
+WindingState windingState = WIND_IDLE;
 /*=============================*/
 
 /*========== OBJECTS ==========*/
 // stepper linearStepper(LINEAR_STEP_PIN, LINEAR_DIR_PIN);  //OLD DEFINITION
 AccelStepper LinearStepper(AccelStepper::DRIVER, LINEAR_STEP_PIN, LINEAR_DIR_PIN);
 // stepper rotaryStepper(ROTARY_DIR_PIN, ROTARY_STEP_PIN);
+AccelStepper RotaryStepper(AccelStepper::DRIVER, ROTARY_STEP_PIN, ROTARY_DIR_PIN);
 Encoder myenc(ENC_CHANNEL_A, ENC_CHANNEL_B);
 // LiquidCrystal(rs, en, d4, d5, d6, d7)
 LiquidCrystal lcd(12, 11, 4, 5, 6, 7);
 AceButton jogRightBtn(JOG_RIGHT_BTN_PIN);
 AceButton jogLeftBtn(JOG_LEFT_BTN_PIN);
 /*=============================*/
+
+// Services RotaryStepper without blocking. Must be called every loop()
+// iteration, and inside any blocking while-loop elsewhere (home(), jogBtn())
+// so a homing pass or a jog never stalls an in-progress winding rotation.
+void pumpRotary() {
+    if (windingState == WIND_RUNNING) {
+        // Continuously re-arm a far-off target so RotaryStepper ramps up via
+        // its normal accel profile and then cruises indefinitely, instead of
+        // jumping straight to speed.
+        if (RotaryStepper.distanceToGo() == 0) {
+            RotaryStepper.move(ROTARY_RUN_DIRECTION * 2000000000L);
+        }
+        RotaryStepper.run();
+    } else if (windingState == WIND_STOPPING) {
+        RotaryStepper.run();
+        if (!RotaryStepper.isRunning()) {
+            windingState = WIND_IDLE;
+        }
+    }
+}
+
+// Toggles the rotary winding drive on/off. Called from the (repurposed)
+// right jog button. Starting ramps up smoothly; stopping decelerates under
+// AccelStepper's own ramp rather than an instant halt.
+void toggleWinding() {
+    if (windingState == WIND_IDLE) {
+        RotaryStepper.setCurrentPosition(0);
+        RotaryStepper.move(ROTARY_RUN_DIRECTION * 2000000000L);
+        windingState = WIND_RUNNING;
+    } else if (windingState == WIND_RUNNING) {
+        RotaryStepper.stop();
+        windingState = WIND_STOPPING;
+    }
+    // WIND_STOPPING: ignore extra presses, let the in-flight stop finish.
+}
 
 // Drives linearStepper toward the endstop, backs off until the switch
 // releases, moves to START_POS_MM, then zeros all position tracking so
@@ -167,6 +211,7 @@ void home() {
     while(digitalRead(ENDSTOP_PIN) == LOW){
         LinearStepper.move(1000);
         LinearStepper.run();
+        pumpRotary();
     }
     LinearStepper.stop();
 
@@ -174,6 +219,7 @@ void home() {
     while(digitalRead(ENDSTOP_PIN) == HIGH){
         LinearStepper.move(-1000);
         LinearStepper.run();
+        pumpRotary();
     }
     LinearStepper.stop();   //Stop once home has bit reached
     LinearStepper.setCurrentPosition(0);    //Temporary home position
@@ -202,6 +248,7 @@ void jogBtn(int direction, int num_steps) {
     LinearStepper.setAcceleration(LINEAR_ACCELERATION*4);
     while(currentPosTemp != LinearStepper.currentPosition() + num_steps){
         LinearStepper.run();
+        pumpRotary();
         printf("Stepper Stepping - BTN Press\n");
     }
     LinearStepper.stop();
@@ -216,8 +263,9 @@ void jogBtn(int direction, int num_steps) {
 void handleJogEvent(AceButton* button, uint8_t eventType, uint8_t /*buttonState*/) {
     if (eventType != AceButton::kEventPressed) return;
     if (button->getPin() == JOG_RIGHT_BTN_PIN) {
-        jogBtn(1, lround(JOG_MM / LINEAR_RES));
+        toggleWinding();
     } else if (button->getPin() == JOG_LEFT_BTN_PIN) {
+        // TODO: slated to become reset-turn-count + re-home in a future pass.
         jogBtn(-1, lround(JOG_MM / LINEAR_RES));
     }
 }
@@ -238,6 +286,8 @@ void setup() {
 
     LinearStepper.setMaxSpeed(LINEAR_MAX_SPEED);
     LinearStepper.setAcceleration(LINEAR_ACCELERATION);
+    RotaryStepper.setMaxSpeed(ROTARY_MAX_SPEED);
+    RotaryStepper.setAcceleration(ROTARY_ACCELERATION);
 
     pinMode(ENDSTOP_PIN, INPUT_PULLUP);
     pinMode(JOG_RIGHT_BTN_PIN, INPUT_PULLUP);
@@ -258,6 +308,7 @@ void loop() {
     jogRightBtn.check();
     jogLeftBtn.check();
 
+    pumpRotary();
     LinearStepper.run();
 
     long newPos = myenc.read();
