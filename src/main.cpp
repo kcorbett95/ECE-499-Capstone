@@ -126,7 +126,7 @@ using namespace ace_button;
 #define END_JOG_MM          .86     // mm to retract from bobbin end when pass boundary is hit
 #define LEAD_LAG_COMP       0.43     //Half of a rotation buffer at each end
 #define LINEAR_MAX_SPEED      10000     //Steps per second
-#define LINEAR_ACCELERATION     5000      //Steps per second per second
+#define LINEAR_ACCELERATION     10000      //Steps per second per second
 #define ROTARY_MAX_SPEED        5000     //Steps per second, tune to desired winding RPM
 #define ROTARY_ACCELERATION     5000     //Steps per second per second, soft start/stop ramp
 #define ROTARY_RUN_DIRECTION       1     //1 or -1, tune to match desired winding direction
@@ -137,6 +137,7 @@ using namespace ace_button;
 long prevPos = 0;
 long issuedSteps = 0;
 long targetSteps = 0;
+long jogOffset = 0;
 bool atEndFlag = false;
 double endFlagTriggerRevs = 0;
 // Steps for one full traversal pass across the layer width
@@ -147,6 +148,9 @@ const long LAYER_STEPS = lround((double)ROTATIONS_PER_LAYER * WIRE_DIAMETER / LI
 // STOPPING (decelerating) -> back to IDLE once fully stopped.
 enum WindingState { WIND_IDLE, WIND_RUNNING, WIND_STOPPING };
 WindingState windingState = WIND_IDLE;
+
+unsigned long lastDisplayUpdate = 0;
+const unsigned long DISPLAY_INTERVAL_MS = 100;  // update ~10x/sec, plenty for a human-readable display
 /*=============================*/
 
 /*========== OBJECTS ==========*/
@@ -261,10 +265,9 @@ void home() {
 
 void jogBtn(int direction, int num_steps) {
     // linearStepper.step(direction, num_steps);    //! Old Implementation
-    int currentPosTemp = LinearStepper.currentPosition();
     LinearStepper.move(direction * num_steps);
     LinearStepper.setAcceleration(LINEAR_ACCELERATION*4);
-    while(currentPosTemp != LinearStepper.currentPosition() + num_steps){
+    while(LinearStepper.distanceToGo() != 0){
         LinearStepper.run();
         pumpRotary();
         printf("Stepper Stepping - BTN Press\n");
@@ -272,10 +275,7 @@ void jogBtn(int direction, int num_steps) {
     LinearStepper.stop();
     printf("Stepper Stopped - BTN Press\n");
     LinearStepper.setAcceleration(LINEAR_ACCELERATION);
-    // Reset issuedSteps to targetSteps so deltaSteps = 0 on the next loop
-    // iteration. The winding loop then sees no error and issues no correction
-    // steps — the motor holds its new jogged position.
-    issuedSteps = targetSteps;
+    jogOffset += direction * num_steps;
 }
 
 void handleJogEvent(AceButton* button, uint8_t eventType, uint8_t /*buttonState*/) {
@@ -300,6 +300,7 @@ void setup() {
     lcd.print("Capstone 2026");
     delay(2000);
 
+    Serial.begin(115200);
     Serial.begin(115200);
 
     LinearStepper.setMaxSpeed(LINEAR_MAX_SPEED);
@@ -342,23 +343,27 @@ void loop() {
     }
 
     long newPos = myenc.read();
-    double revolutionsTotal = (double)newPos / (RESOLUTION * 4.0);
-    int passNumber = (int)(revolutionsTotal / ROTATIONS_PER_LAYER);  //Rounds Down Always
-    double revolutionsInPass = revolutionsTotal - (passNumber * ROTATIONS_PER_LAYER);
+    double revolutionsTotal = (double)newPos / (RESOLUTION * 4.0); //Absolute Total Revolutions Completed
+    int passNumber = (int)(revolutionsTotal / ROTATIONS_PER_LAYER);  //Rounds Down Always. Begins at 0 (LtR)
+    double revolutionsInPass = revolutionsTotal - (passNumber * ROTATIONS_PER_LAYER);   //Relative Number of Revolutions in a Given Pass
 
     if (newPos != prevPos) {
-        char buf[9];
-        lcd.setCursor(8, 0);
-        dtostrf(revolutionsTotal, 7, 2, buf);
-        lcd.print(buf);
-
-        lcd.setCursor(7, 1);
-        dtostrf((double)newPos, 8, 0, buf);
-        lcd.print(buf);
-
-        printf("Count: %ld\t Pass: %ld\t Turns: %.2f\n", newPos, passNumber, revolutionsTotal);
-
         prevPos = newPos;
+
+        if (millis() - lastDisplayUpdate >= DISPLAY_INTERVAL_MS) {
+            lastDisplayUpdate = millis();
+
+            char buf[9];
+            lcd.setCursor(8, 0);
+            dtostrf(revolutionsTotal, 7, 2, buf);
+            lcd.print(buf);
+
+            lcd.setCursor(7, 1);
+            dtostrf((double)newPos, 8, 0, buf);
+            lcd.print(buf);
+
+            printf("Count: %ld\t Pass: %d\t Turns: %.2f\n", newPos, passNumber, revolutionsTotal);
+        }
     }
 
     // Linear steps completed within the current pass
@@ -375,7 +380,7 @@ void loop() {
         // Direction is opposite to the pass just completed:
         //   even pass = forward (dir 1), so retract backward (dir 0)
         //   odd pass  = backward (dir 0), so retract forward (dir 1)
-        int retractDir = (passNumber % 2 == 0) ? -1 : 1;
+        int retractDir = (passNumber % 2 == 0) ? 1 : -1;
         // linearStepper.step(retractDir, lround(END_JOG_MM / LINEAR_RES));
         LinearStepper.move(retractDir * lround(END_JOG_MM / LINEAR_RES));
     }
@@ -385,29 +390,27 @@ void loop() {
     // at the moment of resumption — no catch-up jump.
     if (atEndFlag && revolutionsTotal >= endFlagTriggerRevs + LEAD_LAG_COMP) {
         atEndFlag = false;
+
+        long formulaTarget;
         if (passNumber % 2 == 0) {
-            issuedSteps = stepsInPass;
+            formulaTarget = stepsInPass;
         } else {
-            issuedSteps = LAYER_STEPS - stepsInPass;
+            formulaTarget = LAYER_STEPS - stepsInPass;
         }
+
+        // Relabel the carriage's current (retracted) physical position as that target,
+        // adjusted for any active jog offset. No motion occurs — just a coordinate reset.
+        LinearStepper.setCurrentPosition(formulaTarget + jogOffset);
     }
 
     if (!atEndFlag) {
-        // Even pass: traverse forward; odd pass: traverse in reverse
+        // Even pass: traverse forward (LtR); odd pass: traverse in reverse (RtL)
         if (passNumber % 2 == 0) {
             targetSteps = stepsInPass;
         } else {
             targetSteps = (LAYER_STEPS - stepsInPass);
         }
 
-        // Issue only the new steps needed to reach targetSteps
-        long deltaSteps = targetSteps - issuedSteps;
-        if (deltaSteps > 0) {
-            // linearStepper.step(1, deltaSteps);
-            issuedSteps += deltaSteps;
-        } else if (deltaSteps < 0) {
-            // linearStepper.step(0, -deltaSteps);
-            issuedSteps += deltaSteps;
-        }
+        LinearStepper.moveTo(targetSteps + jogOffset);
     }
 }
