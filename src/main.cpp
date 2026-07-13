@@ -76,12 +76,12 @@ using namespace ace_button;
  *  Blue       0V / GND         GND         Common with Arduino GND
  *  Black      NPN output       A3          INPUT_PULLUP; LOW = tripped
  *
- * Jog Buttons (momentary NO, one side to GND)
+ * Control Buttons (momentary NO, one side to GND)
  * ---------------------------------------------------------------------------
- *  Button     Nano Pin         Notes
- *  ------     --------         -----
- *  Jog CW     A0               INPUT_PULLUP; LOW = pressed
- *  Jog CCW    A2               INPUT_PULLUP; LOW = pressed
+ *  Button                  Nano Pin         Notes
+ *  ------                  --------         -----
+ *  Home (Right)            A0               INPUT_PULLUP; LOW = pressed
+ *  Start/Stop (Left)       A2               INPUT_PULLUP; LOW = pressed
  *
  * Reset Button
  * ---------------------------------------------------------------------------
@@ -121,14 +121,13 @@ using namespace ace_button;
 #define HOME_DIR        0       // right to left, toward the endstop
 #define START_POS_MM    7.8    // mm from endstop to winding start position
 #define START_RIGHT_SHIFT_MM 6  //Starting shift to the right
-#define JOG_RIGHT_BTN_PIN   A2  // A1 pin is broken on the Nano board
-#define JOG_LEFT_BTN_PIN    A0
-#define JOG_MM              0.5      // mm to move per button press
+#define START_STOP_BTN_PIN   A2  // A1 pin is broken on the Nano board
+#define HOME_BTN_PIN    A0
 #define END_JOG_MM          .86     // mm to retract from bobbin end when pass boundary is hit
 #define LEAD_LAG_COMP       0.43     //Half of a rotation buffer at each end
 #define LINEAR_MAX_SPEED      10000     //Steps per second
 #define LINEAR_ACCELERATION     10000      //Steps per second per second
-#define ROTARY_MAX_SPEED        15000     //Steps per second, tune to desired winding RPM
+#define ROTARY_MAX_SPEED        20000     //Steps per second, tune to desired winding RPM
 #define ROTARY_ACCELERATION     10000     //Steps per second per second, soft start/stop ramp
 #define ROTARY_RUN_DIRECTION       1     //1 or -1, tune to match desired winding direction
 #define WINDING_TARGET_TURNS      91.5   //Total encoder turns to wind before auto-stopping
@@ -145,9 +144,9 @@ double endFlagTriggerRevs = 0;
 const long LAYER_STEPS = lround((double)ROTATIONS_PER_LAYER * WIRE_DIAMETER / LINEAR_RES);
 // const long LINEAR_DIST_COMP = lround((WIRE_DIAMETER / LINEAR_RES) * LEAD_LAG_COMP);
 
-// Rotary drive state: IDLE (not moving) -> RUNNING (spinning, button-started) ->
-// STOPPING (decelerating) -> back to IDLE once fully stopped.
-enum WindingState { WIND_IDLE, WIND_RUNNING, WIND_STOPPING };
+// Rotary drive state: IDLE (not moving) <-> RUNNING (spinning, button-started).
+// Stopping is instant (no decel ramp), so there's no transitional state.
+enum WindingState { WIND_IDLE, WIND_RUNNING };
 WindingState windingState = WIND_IDLE;
 
 unsigned long lastDisplayUpdate = 0;
@@ -162,8 +161,8 @@ AccelStepper RotaryStepper(AccelStepper::DRIVER, ROTARY_STEP_PIN, ROTARY_DIR_PIN
 Encoder myenc(ENC_CHANNEL_A, ENC_CHANNEL_B);
 // LiquidCrystal(rs, en, d4, d5, d6, d7)
 LiquidCrystal lcd(12, 11, 4, 5, 6, 7);
-AceButton jogRightBtn(JOG_RIGHT_BTN_PIN);
-AceButton jogLeftBtn(JOG_LEFT_BTN_PIN);
+AceButton startStopBtn(START_STOP_BTN_PIN);
+AceButton homeBtn(HOME_BTN_PIN);
 /*=============================*/
 
 // Total revolutions turned since the encoder was last zeroed (home()).
@@ -171,40 +170,36 @@ double revolutionsWound() {
     return (double)myenc.read() / (RESOLUTION * 4.0);
 }
 
-// Begins a controlled deceleration to zero rather than an instant halt.
+// Halts RotaryStepper immediately (no decel ramp) and disables the driver
+// so the shaft free-spins right away.
 void stopWinding() {
-    RotaryStepper.stop();
-    windingState = WIND_STOPPING;
+    RotaryStepper.setCurrentPosition(RotaryStepper.currentPosition());
+    digitalWrite(ROTARY_EN_PIN, HIGH);
+    windingState = WIND_IDLE;
 }
 
 // Services RotaryStepper without blocking. Must be called every loop()
 // iteration, and inside any blocking while-loop elsewhere (home(), jogBtn())
 // so a homing pass or a jog never stalls an in-progress winding rotation.
 void pumpRotary() {
-    if (windingState == WIND_IDLE) return;
+    if (windingState != WIND_RUNNING) return;
 
-    if (windingState == WIND_RUNNING) {
-        if (revolutionsWound() >= WINDING_TARGET_TURNS) {
-            stopWinding();
-        } else if (RotaryStepper.distanceToGo() == 0) {
-            // Continuously re-arm a far-off target so RotaryStepper ramps up
-            // via its normal accel profile and then cruises indefinitely,
-            // instead of jumping straight to speed.
-            RotaryStepper.move(ROTARY_RUN_DIRECTION * 2000000000L);
-        }
+    if (revolutionsWound() >= WINDING_TARGET_TURNS) {
+        stopWinding();
+        return;
     }
 
+    if (RotaryStepper.distanceToGo() == 0) {
+        // Continuously re-arm a far-off target so RotaryStepper ramps up
+        // via its normal accel profile and then cruises indefinitely,
+        // instead of jumping straight to speed.
+        RotaryStepper.move(ROTARY_RUN_DIRECTION * 2000000000L);
+    }
     RotaryStepper.run();
-
-    if (windingState == WIND_STOPPING && !RotaryStepper.isRunning()) {
-        digitalWrite(ROTARY_EN_PIN, HIGH);   // fully stopped: disable driver, free-spin
-        windingState = WIND_IDLE;
-    }
 }
 
-// Toggles the rotary winding drive on/off. Called from the (repurposed)
-// right jog button. Starting ramps up smoothly; stopping decelerates under
-// AccelStepper's own ramp rather than an instant halt.
+// Toggles the rotary winding drive on/off. Called from the left button. 
+// Starting ramps up smoothly; stopping is instant.
 void toggleWinding() {
     if (windingState == WIND_IDLE) {
         digitalWrite(ROTARY_EN_PIN, LOW);    // enable driver before commanding motion
@@ -212,17 +207,16 @@ void toggleWinding() {
         RotaryStepper.move(ROTARY_RUN_DIRECTION * 2000000000L);
         windingState = WIND_RUNNING;
         printf("toggleWinding: IDLE -> RUNNING, target=%ld\n", RotaryStepper.targetPosition());
-    } else if (windingState == WIND_RUNNING) {
-        stopWinding();
-        printf("toggleWinding: RUNNING -> STOPPING\n");
     } else {
-        printf("toggleWinding: ignored press, still STOPPING\n");
+        stopWinding();
+        printf("toggleWinding: RUNNING -> IDLE (instant stop)\n");
     }
 }
 
 // Drives linearStepper toward the endstop, backs off until the switch
-// releases, moves to START_POS_MM, then zeros all position tracking so
-// encoder=0 corresponds to the winding start position.
+// releases, moves to START_POS_MM, then zeros the encoder and all pass/turn
+// tracking so encoder=0 corresponds to the winding start position — used
+// both at startup and as the operator-triggered "reset turn count" action.
 // Halts with an LCD error if the endstop is not reached within MAX_HOME_STEPS.
 void home() {
     const long MAX_HOME_STEPS = 500000;
@@ -256,38 +250,38 @@ void home() {
         while (true);
     }
 
-    // Move to winding start position, then zero tracking
+    // Move to winding start position, then zero all tracking so this
+    // becomes the new zero-turn reference point.
     long startPositionSteps = lround(START_POS_MM / LINEAR_RES);
     LinearStepper.runToNewPosition(startPositionSteps);
 
     issuedSteps = 0;
+    targetSteps = 0;
+    jogOffset = 0;
+    atEndFlag = false;
+    endFlagTriggerRevs = 0;
     myenc.write(0);
     prevPos = 0;
     LinearStepper.setCurrentPosition(0);    //Sets current position to position 0. Final Reference point.
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("N_Turns:             ");
+    lcd.setCursor(0, 1);
+    lcd.print("Count:               ");
 }
 
-void jogBtn(int direction, int num_steps) {
-    // linearStepper.step(direction, num_steps);    //! Old Implementation
-    LinearStepper.move(direction * num_steps);
-    LinearStepper.setAcceleration(LINEAR_ACCELERATION*4);
-    while(LinearStepper.distanceToGo() != 0){
-        LinearStepper.run();
-        pumpRotary();
-        printf("Stepper Stepping - BTN Press\n");
-    }
-    LinearStepper.stop();
-    printf("Stepper Stopped - BTN Press\n");
-    LinearStepper.setAcceleration(LINEAR_ACCELERATION);
-    jogOffset += direction * num_steps;
-}
-
-void handleJogEvent(AceButton* button, uint8_t eventType, uint8_t /*buttonState*/) {
+void handleBtnEvent(AceButton* button, uint8_t eventType, uint8_t /*buttonState*/) {
     if (eventType != AceButton::kEventPressed) return;
-    if (button->getPin() == JOG_RIGHT_BTN_PIN) {
+    if (button->getPin() == START_STOP_BTN_PIN) {
         toggleWinding();
-    } else if (button->getPin() == JOG_LEFT_BTN_PIN) {
-        // TODO: slated to become reset-turn-count + re-home in a future pass.
-        jogBtn(-1, lround(JOG_MM / LINEAR_RES));
+    } else if (button->getPin() == HOME_BTN_PIN) {
+        // Reset turn count + re-home. Stop any in-progress winding first so
+        // the carriage doesn't re-home while the bobbin is still spinning.
+        if (windingState == WIND_RUNNING) {
+            stopWinding();
+        }
+        home();
     }
 }
 
@@ -301,7 +295,7 @@ void setup() {
     lcd.print("ViVitro Labs");
     lcd.setCursor(0, 1);
     lcd.print("Capstone 2026");
-    delay(2000);
+    //delay(2000);
 
     Serial.begin(115200);
     Serial.begin(115200);
@@ -312,25 +306,19 @@ void setup() {
     RotaryStepper.setAcceleration(ROTARY_ACCELERATION);
 
     pinMode(ENDSTOP_PIN, INPUT_PULLUP);
-    pinMode(JOG_RIGHT_BTN_PIN, INPUT_PULLUP);
-    pinMode(JOG_LEFT_BTN_PIN, INPUT_PULLUP);
+    pinMode(START_STOP_BTN_PIN, INPUT_PULLUP);
+    pinMode(HOME_BTN_PIN, INPUT_PULLUP);
     pinMode(ROTARY_EN_PIN, OUTPUT);
     digitalWrite(ROTARY_EN_PIN, HIGH);   // start disabled: free-spinning, no holding torque
-    ButtonConfig::getSystemButtonConfig()->setEventHandler(handleJogEvent);
+    ButtonConfig::getSystemButtonConfig()->setEventHandler(handleBtnEvent);
 
-    home(); //Homes the linear drive carrage
-
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("N_Turns:             ");
-    lcd.setCursor(0, 1);
-    lcd.print("Count:               ");
+    home(); //Homes the linear drive carriage; also draws the N_Turns/Count LCD labels
 }
 
 void loop() {
 
-    jogRightBtn.check();
-    jogLeftBtn.check();
+    startStopBtn.check();
+    homeBtn.check();
 
     pumpRotary();
     LinearStepper.run();
@@ -339,13 +327,13 @@ void loop() {
     // is advancing (firmware side) independent of whether the physical
     // motor is actually turning (hardware/wiring side). Remove once the
     // no-motion issue is diagnosed.
-    static unsigned long lastRotaryDebug = 0;
-    if (millis() - lastRotaryDebug >= 500) {
-        lastRotaryDebug = millis();
-        printf("windingState=%d rotaryPos=%ld rotarySpeed=%.1f rotaryTarget=%ld\n",
-               windingState, RotaryStepper.currentPosition(), (double)RotaryStepper.speed(),
-               RotaryStepper.targetPosition());
-    }
+    // static unsigned long lastRotaryDebug = 0;
+    // if (millis() - lastRotaryDebug >= 500) {
+    //     lastRotaryDebug = millis();
+    //     printf("windingState=%d rotaryPos=%ld rotarySpeed=%.1f rotaryTarget=%ld\n",
+    //            windingState, RotaryStepper.currentPosition(), (double)RotaryStepper.speed(),
+    //            RotaryStepper.targetPosition());
+    // }
 
     long newPos = myenc.read();
     double revolutionsTotal = (double)newPos / (RESOLUTION * 4.0); //Absolute Total Revolutions Completed
