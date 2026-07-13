@@ -127,9 +127,10 @@ using namespace ace_button;
 #define LEAD_LAG_COMP       0.43     //Half of a rotation buffer at each end
 #define LINEAR_MAX_SPEED      10000     //Steps per second
 #define LINEAR_ACCELERATION     5000      //Steps per second per second
-#define ROTARY_MAX_SPEED        2000     //Steps per second, tune to desired winding RPM
-#define ROTARY_ACCELERATION     2000     //Steps per second per second, soft start/stop ramp
+#define ROTARY_MAX_SPEED        5000     //Steps per second, tune to desired winding RPM
+#define ROTARY_ACCELERATION     5000     //Steps per second per second, soft start/stop ramp
 #define ROTARY_RUN_DIRECTION       1     //1 or -1, tune to match desired winding direction
+#define WINDING_TARGET_TURNS      91.5   //Total encoder turns to wind before auto-stopping
 /*=============================*/
 
 /*========== GLOBALS ==========*/
@@ -160,23 +161,38 @@ AceButton jogRightBtn(JOG_RIGHT_BTN_PIN);
 AceButton jogLeftBtn(JOG_LEFT_BTN_PIN);
 /*=============================*/
 
+// Total revolutions turned since the encoder was last zeroed (home()).
+double revolutionsWound() {
+    return (double)myenc.read() / (RESOLUTION * 4.0);
+}
+
+// Begins a controlled deceleration to zero rather than an instant halt.
+void stopWinding() {
+    RotaryStepper.stop();
+    windingState = WIND_STOPPING;
+}
+
 // Services RotaryStepper without blocking. Must be called every loop()
 // iteration, and inside any blocking while-loop elsewhere (home(), jogBtn())
 // so a homing pass or a jog never stalls an in-progress winding rotation.
 void pumpRotary() {
+    if (windingState == WIND_IDLE) return;
+
     if (windingState == WIND_RUNNING) {
-        // Continuously re-arm a far-off target so RotaryStepper ramps up via
-        // its normal accel profile and then cruises indefinitely, instead of
-        // jumping straight to speed.
-        if (RotaryStepper.distanceToGo() == 0) {
+        if (revolutionsWound() >= WINDING_TARGET_TURNS) {
+            stopWinding();
+        } else if (RotaryStepper.distanceToGo() == 0) {
+            // Continuously re-arm a far-off target so RotaryStepper ramps up
+            // via its normal accel profile and then cruises indefinitely,
+            // instead of jumping straight to speed.
             RotaryStepper.move(ROTARY_RUN_DIRECTION * 2000000000L);
         }
-        RotaryStepper.run();
-    } else if (windingState == WIND_STOPPING) {
-        RotaryStepper.run();
-        if (!RotaryStepper.isRunning()) {
-            windingState = WIND_IDLE;
-        }
+    }
+
+    RotaryStepper.run();
+
+    if (windingState == WIND_STOPPING && !RotaryStepper.isRunning()) {
+        windingState = WIND_IDLE;
     }
 }
 
@@ -188,11 +204,13 @@ void toggleWinding() {
         RotaryStepper.setCurrentPosition(0);
         RotaryStepper.move(ROTARY_RUN_DIRECTION * 2000000000L);
         windingState = WIND_RUNNING;
+        printf("toggleWinding: IDLE -> RUNNING, target=%ld\n", RotaryStepper.targetPosition());
     } else if (windingState == WIND_RUNNING) {
-        RotaryStepper.stop();
-        windingState = WIND_STOPPING;
+        stopWinding();
+        printf("toggleWinding: RUNNING -> STOPPING\n");
+    } else {
+        printf("toggleWinding: ignored press, still STOPPING\n");
     }
-    // WIND_STOPPING: ignore extra presses, let the in-flight stop finish.
 }
 
 // Drives linearStepper toward the endstop, backs off until the switch
@@ -282,7 +300,7 @@ void setup() {
     lcd.print("Capstone 2026");
     delay(2000);
 
-    Serial.begin(9600);
+    Serial.begin(115200);
 
     LinearStepper.setMaxSpeed(LINEAR_MAX_SPEED);
     LinearStepper.setAcceleration(LINEAR_ACCELERATION);
@@ -310,6 +328,18 @@ void loop() {
 
     pumpRotary();
     LinearStepper.run();
+
+    // TEMP DEBUG: confirms whether RotaryStepper's internal position/speed
+    // is advancing (firmware side) independent of whether the physical
+    // motor is actually turning (hardware/wiring side). Remove once the
+    // no-motion issue is diagnosed.
+    static unsigned long lastRotaryDebug = 0;
+    if (millis() - lastRotaryDebug >= 500) {
+        lastRotaryDebug = millis();
+        printf("windingState=%d rotaryPos=%ld rotarySpeed=%.1f rotaryTarget=%ld\n",
+               windingState, RotaryStepper.currentPosition(), (double)RotaryStepper.speed(),
+               RotaryStepper.targetPosition());
+    }
 
     long newPos = myenc.read();
     double revolutionsTotal = (double)newPos / (RESOLUTION * 4.0);
