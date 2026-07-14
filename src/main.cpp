@@ -110,7 +110,7 @@ using namespace ace_button;
 
 /*========== MISC DEFINES ==========*/
 #define ROTATIONS_PER_LAYER 23
-#define WIRE_DIAMETER   0.41    // mm
+#define WIRE_DIAMETER   0.39    // mm
 #define LINEAR_RES      0.00106 // mm per microstep, verified by measurement
 #define LINEAR_STEP_PIN        8
 #define LINEAR_DIR_PIN         9
@@ -123,14 +123,14 @@ using namespace ace_button;
 #define START_RIGHT_SHIFT_MM 6  //Starting shift to the right
 #define START_STOP_BTN_PIN   A2  // A1 pin is broken on the Nano board
 #define HOME_BTN_PIN    A0
-#define END_JOG_MM          .86     // mm to retract from bobbin end when pass boundary is hit
-#define LEAD_LAG_COMP       0.43     //Half of a rotation buffer at each end
-#define LINEAR_MAX_SPEED      10000     //Steps per second
+#define END_JOG_MM          0.8     // mm to retract from bobbin end when pass boundary is hit
+#define LINEAR_MAX_SPEED      20000     //Steps per second
 #define LINEAR_ACCELERATION     10000      //Steps per second per second
-#define ROTARY_MAX_SPEED        20000     //Steps per second, tune to desired winding RPM
-#define ROTARY_ACCELERATION     10000     //Steps per second per second, soft start/stop ramp
+#define ROTARY_MAX_SPEED        4000     //Steps per second, tune to desired winding RPM
+#define ROTARY_ACCELERATION     2000     //Steps per second per second, soft start ramp
+#define ROTARY_START_SPEED        200.0   //Steps per second, ramp starting point
 #define ROTARY_RUN_DIRECTION       1     //1 or -1, tune to match desired winding direction
-#define WINDING_TARGET_TURNS      91.5   //Total encoder turns to wind before auto-stopping
+#define WINDING_TARGET_TURNS      92.5   //Total encoder turns to wind before auto-stopping
 /*=============================*/
 
 /*========== GLOBALS ==========*/
@@ -139,10 +139,12 @@ long issuedSteps = 0;
 long targetSteps = 0;
 long jogOffset = 0;
 bool atEndFlag = false;
-double endFlagTriggerRevs = 0;
+// Which pass boundary has already triggered a retract, so re-entering the
+// same boundary can't re-trigger it (the encoder freezes while rotary is
+// paused, so a live revolutionsInPass threshold can't be used to guard this).
+int lastHandledPassBoundary = -1;
 // Steps for one full traversal pass across the layer width
 const long LAYER_STEPS = lround((double)ROTATIONS_PER_LAYER * WIRE_DIAMETER / LINEAR_RES);
-// const long LINEAR_DIST_COMP = lround((WIRE_DIAMETER / LINEAR_RES) * LEAD_LAG_COMP);
 
 // Rotary drive state: IDLE (not moving) <-> RUNNING (spinning, button-started).
 // Stopping is instant (no decel ramp), so there's no transitional state.
@@ -156,8 +158,6 @@ const unsigned long DISPLAY_INTERVAL_MS = 100;  // update ~10x/sec, plenty for a
 /*========== OBJECTS ==========*/
 // stepper linearStepper(LINEAR_STEP_PIN, LINEAR_DIR_PIN);  //OLD DEFINITION
 AccelStepper LinearStepper(AccelStepper::DRIVER, LINEAR_STEP_PIN, LINEAR_DIR_PIN);
-// stepper rotaryStepper(ROTARY_DIR_PIN, ROTARY_STEP_PIN);
-AccelStepper RotaryStepper(AccelStepper::DRIVER, ROTARY_STEP_PIN, ROTARY_DIR_PIN);
 Encoder myenc(ENC_CHANNEL_A, ENC_CHANNEL_B);
 // LiquidCrystal(rs, en, d4, d5, d6, d7)
 LiquidCrystal lcd(12, 11, 4, 5, 6, 7);
@@ -165,22 +165,105 @@ AceButton startStopBtn(START_STOP_BTN_PIN);
 AceButton homeBtn(HOME_BTN_PIN);
 /*=============================*/
 
+/*========== ROTARY TIMER (Timer1 hardware STEP pulse generator) ==========*/
+// ROTARY_STEP_PIN (D10) is OC1B. Timer1 runs in CTC mode (TOP=ICR1, prescaler
+// 8) with OC1B set to auto-toggle on every compare match, so STEP pulses are
+// generated entirely in hardware, independent of loop() timing. This removes
+// the ~1.7kHz ceiling a loop()-polled AccelStepper hit at high speed — the
+// achievable step rate is no longer limited by how often loop() runs.
+#define ROTARY_TIMER_PRESCALER   8
+#define ROTARY_TIMER_HZ          (F_CPU / ROTARY_TIMER_PRESCALER)   // 2,000,000 Hz @ 16MHz/8
+
+double rotaryCommandedFreq = 0.0;
+unsigned long rotaryRampStartMicros = 0;
+bool rotaryRampActive = false;
+
+// Sets the STEP pulse frequency by rewriting Timer1's TOP (ICR1).
+void rotarySetFrequency(double freqHz) {
+    long icr = lround((double)ROTARY_TIMER_HZ / (2.0 * freqHz)) - 1;
+    if (icr < 1) icr = 1;
+    if (icr > 65535) icr = 65535;
+    noInterrupts();
+    ICR1 = (uint16_t)icr;
+    interrupts();
+    rotaryCommandedFreq = freqHz;
+}
+
+// Sets DIR, enables Timer1 hardware toggling of OC1B (D10), and begins the
+// soft-start ramp from ROTARY_START_SPEED toward ROTARY_MAX_SPEED.
+void rotaryTimerStart() {
+    digitalWrite(ROTARY_DIR_PIN, ROTARY_RUN_DIRECTION > 0 ? HIGH : LOW);
+    TCCR1A = (1 << COM1B0);                                // toggle OC1B on compare match
+    TCCR1B = (1 << WGM13) | (1 << WGM12) | (1 << CS11);    // CTC, TOP=ICR1, prescaler=8
+    OCR1B = 0;
+    TCNT1 = 0;
+    rotaryRampStartMicros = micros();
+    rotaryRampActive = true;
+    rotarySetFrequency(ROTARY_START_SPEED);
+}
+
+// Disconnects OC1B immediately — STEP pulses stop with no residual edges.
+void rotaryTimerStop() {
+    TCCR1A &= ~((1 << COM1B1) | (1 << COM1B0));   // OC1B disconnected, normal port operation
+    TCCR1B = 0;                                    // stop the timer clock
+    digitalWrite(ROTARY_STEP_PIN, LOW);
+    rotaryRampActive = false;
+    rotaryCommandedFreq = 0.0;
+}
+
+// Advances the soft-start ramp toward ROTARY_MAX_SPEED. Cheap to call every
+// loop() iteration; stops touching the timer register once at cruise speed.
+void rotaryRampUpdate() {
+    if (!rotaryRampActive) return;
+    double elapsedSec = (micros() - rotaryRampStartMicros) / 1000000.0;
+    double freq = ROTARY_START_SPEED + ROTARY_ACCELERATION * elapsedSec;
+    if (freq >= ROTARY_MAX_SPEED) {
+        freq = ROTARY_MAX_SPEED;
+        rotaryRampActive = false;
+    }
+    rotarySetFrequency(freq);
+}
+
+// Brief pass-boundary hold, distinct from a full stopWinding(): disconnects
+// OC1B so STEP pulses stop, but leaves EN enabled so the driver keeps
+// holding torque (the bobbin doesn't drift under wire tension) and leaves
+// the ramp state untouched, so resuming continues at the same commanded
+// speed instead of re-ramping from a standstill.
+bool rotaryPaused = false;
+
+void rotaryPauseSteps() {
+    if (rotaryPaused) return;
+    TCCR1A &= ~((1 << COM1B1) | (1 << COM1B0));   // OC1B disconnected, normal port operation
+    digitalWrite(ROTARY_STEP_PIN, LOW);
+    rotaryPaused = true;
+}
+
+void rotaryResumeSteps() {
+    if (!rotaryPaused) return;
+    TCNT1 = 0;
+    TCCR1A |= (1 << COM1B0);   // reconnect OC1B toggle-on-compare
+    rotaryPaused = false;
+}
+/*=============================*/
+
 // Total revolutions turned since the encoder was last zeroed (home()).
 double revolutionsWound() {
     return (double)myenc.read() / (RESOLUTION * 4.0);
 }
 
-// Halts RotaryStepper immediately (no decel ramp) and disables the driver
+// Halts the rotary drive immediately (no decel ramp) and disables the driver
 // so the shaft free-spins right away.
 void stopWinding() {
-    RotaryStepper.setCurrentPosition(RotaryStepper.currentPosition());
+    rotaryTimerStop();
     digitalWrite(ROTARY_EN_PIN, HIGH);
     windingState = WIND_IDLE;
 }
 
-// Services RotaryStepper without blocking. Must be called every loop()
-// iteration, and inside any blocking while-loop elsewhere (home(), jogBtn())
-// so a homing pass or a jog never stalls an in-progress winding rotation.
+// Services the rotary drive's soft-start ramp and turn-count auto-stop.
+// Must be called every loop() iteration, and inside any blocking while-loop
+// elsewhere (home()) — the STEP pulses themselves run in hardware regardless,
+// but this still needs to run regularly to advance the ramp and catch
+// WINDING_TARGET_TURNS in a timely fashion.
 void pumpRotary() {
     if (windingState != WIND_RUNNING) return;
 
@@ -189,24 +272,17 @@ void pumpRotary() {
         return;
     }
 
-    if (RotaryStepper.distanceToGo() == 0) {
-        // Continuously re-arm a far-off target so RotaryStepper ramps up
-        // via its normal accel profile and then cruises indefinitely,
-        // instead of jumping straight to speed.
-        RotaryStepper.move(ROTARY_RUN_DIRECTION * 2000000000L);
-    }
-    RotaryStepper.run();
+    rotaryRampUpdate();
 }
 
-// Toggles the rotary winding drive on/off. Called from the left button. 
+// Toggles the rotary winding drive on/off. Called from the left button.
 // Starting ramps up smoothly; stopping is instant.
 void toggleWinding() {
     if (windingState == WIND_IDLE) {
         digitalWrite(ROTARY_EN_PIN, LOW);    // enable driver before commanding motion
-        RotaryStepper.setCurrentPosition(0);
-        RotaryStepper.move(ROTARY_RUN_DIRECTION * 2000000000L);
+        rotaryTimerStart();
         windingState = WIND_RUNNING;
-        printf("toggleWinding: IDLE -> RUNNING, target=%ld\n", RotaryStepper.targetPosition());
+        printf("toggleWinding: IDLE -> RUNNING\n");
     } else {
         stopWinding();
         printf("toggleWinding: RUNNING -> IDLE (instant stop)\n");
@@ -259,7 +335,7 @@ void home() {
     targetSteps = 0;
     jogOffset = 0;
     atEndFlag = false;
-    endFlagTriggerRevs = 0;
+    lastHandledPassBoundary = -1;
     myenc.write(0);
     prevPos = 0;
     LinearStepper.setCurrentPosition(0);    //Sets current position to position 0. Final Reference point.
@@ -302,12 +378,12 @@ void setup() {
 
     LinearStepper.setMaxSpeed(LINEAR_MAX_SPEED);
     LinearStepper.setAcceleration(LINEAR_ACCELERATION);
-    RotaryStepper.setMaxSpeed(ROTARY_MAX_SPEED);
-    RotaryStepper.setAcceleration(ROTARY_ACCELERATION);
 
     pinMode(ENDSTOP_PIN, INPUT_PULLUP);
     pinMode(START_STOP_BTN_PIN, INPUT_PULLUP);
     pinMode(HOME_BTN_PIN, INPUT_PULLUP);
+    pinMode(ROTARY_STEP_PIN, OUTPUT);    // AccelStepper no longer owns this pin; drive it ourselves
+    pinMode(ROTARY_DIR_PIN, OUTPUT);
     pinMode(ROTARY_EN_PIN, OUTPUT);
     digitalWrite(ROTARY_EN_PIN, HIGH);   // start disabled: free-spinning, no holding torque
     ButtonConfig::getSystemButtonConfig()->setEventHandler(handleBtnEvent);
@@ -323,17 +399,27 @@ void loop() {
     pumpRotary();
     LinearStepper.run();
 
-    // TEMP DEBUG: confirms whether RotaryStepper's internal position/speed
-    // is advancing (firmware side) independent of whether the physical
-    // motor is actually turning (hardware/wiring side). Remove once the
-    // no-motion issue is diagnosed.
-    // static unsigned long lastRotaryDebug = 0;
-    // if (millis() - lastRotaryDebug >= 500) {
-    //     lastRotaryDebug = millis();
-    //     printf("windingState=%d rotaryPos=%ld rotarySpeed=%.1f rotaryTarget=%ld\n",
-    //            windingState, RotaryStepper.currentPosition(), (double)RotaryStepper.speed(),
-    //            RotaryStepper.targetPosition());
-    // }
+    // TEMP DEBUG: loopHz confirms loop() is no longer the bottleneck (STEP
+    // pulses now come from Timer1 hardware, independent of loop() timing).
+    // commandedHz is what Timer1 is actually being told to output.
+    // encRevPerSec is measured straight from the encoder — real physical
+    // shaft speed. If commandedHz climbs toward ROTARY_MAX_SPEED but
+    // encRevPerSec plateaus/stays low, the motor is stalling mechanically
+    // (current/torque/microstep issue), not a firmware limitation.
+    // Remove once the speed issue is diagnosed.
+    static unsigned long rateLoopCount = 0;
+    static unsigned long lastRateCheck = 0;
+    static long lastEncForRate = 0;
+    rateLoopCount++;
+    if (millis() - lastRateCheck >= 1000) {
+        long encNow = myenc.read();
+        printf("loopHz=%lu commandedHz=%.0f encRevPerSec=%.2f windingState=%d\n",
+               rateLoopCount, rotaryCommandedFreq, (encNow - lastEncForRate) / (RESOLUTION * 4.0),
+               windingState);
+        rateLoopCount = 0;
+        lastEncForRate = encNow;
+        lastRateCheck = millis();
+    }
 
     long newPos = myenc.read();
     double revolutionsTotal = (double)newPos / (RESOLUTION * 4.0); //Absolute Total Revolutions Completed
@@ -362,27 +448,36 @@ void loop() {
     // Linear steps completed within the current pass
     long stepsInPass = lround(revolutionsInPass * WIRE_DIAMETER / LINEAR_RES);
 
-    // At each pass boundary, pause linear motion for LEAD_LAG_COMP rotations.
-    // Triggered by entering the first LEAD_LAG_COMP rotations of any new pass (passNumber > 0).
-    // endFlagTriggerRevs stores the exact revolution count at the boundary so the
-    // resume condition is evaluated against a fixed reference, not a moving target.
-    if (!atEndFlag && passNumber > 0 && revolutionsInPass < LEAD_LAG_COMP) {
+    // At each pass boundary, pause the rotary drive itself (not just linear
+    // motion) so the bobbin holds still while the carriage retracts. This
+    // sidesteps racing the retract against a shrinking time window: winding
+    // simply doesn't advance until the carriage is back in position, so it's
+    // correct at any winding speed. Triggered once per distinct passNumber
+    // (not a revolutionsInPass threshold window) — pausing rotary freezes
+    // the encoder for the whole retract, so a live threshold would either
+    // get stepped over between loop() iterations, or re-fire repeatedly
+    // right after resuming since the encoder hasn't yet ticked past it.
+    if (!atEndFlag && passNumber > 0 && passNumber != lastHandledPassBoundary) {
         atEndFlag = true;
-        endFlagTriggerRevs = passNumber * ROTATIONS_PER_LAYER;
-        // Retract from the bobbin end before waiting for LEAD_LAG_COMP turns.
+        lastHandledPassBoundary = passNumber;
+        // Retract from the bobbin end while winding is held.
         // Direction is opposite to the pass just completed:
         //   even pass = forward (dir 1), so retract backward (dir 0)
         //   odd pass  = backward (dir 0), so retract forward (dir 1)
         int retractDir = (passNumber % 2 == 0) ? 1 : -1;
         // linearStepper.step(retractDir, lround(END_JOG_MM / LINEAR_RES));
+        LinearStepper.setAcceleration((float)LINEAR_ACCELERATION * 4);
         LinearStepper.move(retractDir * lround(END_JOG_MM / LINEAR_RES));
+        rotaryPauseSteps();
     }
 
-    // Resume once LEAD_LAG_COMP rotations have elapsed past the boundary.
-    // Sync issuedSteps to the current encoder position so deltaSteps = 0
-    // at the moment of resumption — no catch-up jump.
-    if (atEndFlag && revolutionsTotal >= endFlagTriggerRevs + LEAD_LAG_COMP) {
+    // Resume once the retract has actually finished. Sync issuedSteps to the
+    // current encoder position so deltaSteps = 0 at the moment of
+    // resumption — no catch-up jump.
+    if (atEndFlag && LinearStepper.distanceToGo() == 0) {
         atEndFlag = false;
+        LinearStepper.setAcceleration(LINEAR_ACCELERATION);
+        rotaryResumeSteps();
 
         long formulaTarget;
         if (passNumber % 2 == 0) {
