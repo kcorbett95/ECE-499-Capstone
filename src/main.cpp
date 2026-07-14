@@ -130,21 +130,39 @@ using namespace ace_button;
 #define ROTARY_ACCELERATION     2000     //Steps per second per second, soft start ramp
 #define ROTARY_START_SPEED        200.0   //Steps per second, ramp starting point
 #define ROTARY_RUN_DIRECTION       1     //1 or -1, tune to match desired winding direction
-#define WINDING_TARGET_TURNS      92.5   //Total encoder turns to wind before auto-stopping
+#define TURNS_PER_BOBBIN          92.5   //Encoder turns to wind on EACH bobbin before advancing phase
+#define SLACK_TURNS                3.0   //Turns of slack wire wound in the gap between the two bobbins
+// PLACEHOLDERS — measure on the bench and tune. GAP_POS_MM is where the
+// carriage parks while the slack turns are wound; BOBBIN_B_START_POS_MM is
+// bobbin B's own zero reference (mirrors START_POS_MM/START_RIGHT_SHIFT_MM
+// for bobbin A), both measured from the same endstop-homed zero as bobbin A.
+#define GAP_POS_MM                20.0
+#define BOBBIN_B_START_POS_MM     30.0
+// Bobbin B is mounted the opposite way around, so its first pass needs to
+// travel away from the gap just like bobbin A's does — flip this if the
+// carriage starts bobbin B by moving the wrong direction on the bench.
+#define BOBBIN_B_MIRRORED         true
 /*=============================*/
 
 /*========== GLOBALS ==========*/
 long prevPos = 0;
-long issuedSteps = 0;
 long targetSteps = 0;
-long jogOffset = 0;
 bool atEndFlag = false;
 // Which pass boundary has already triggered a retract, so re-entering the
 // same boundary can't re-trigger it (the encoder freezes while rotary is
 // paused, so a live revolutionsInPass threshold can't be used to guard this).
+// Reset whenever a bobbin's local pass tracking restarts (home(), start of
+// bobbin B), since local pass numbers start over at 0 for each bobbin.
 int lastHandledPassBoundary = -1;
 // Steps for one full traversal pass across the layer width
 const long LAYER_STEPS = lround((double)ROTATIONS_PER_LAYER * WIRE_DIAMETER / LINEAR_RES);
+
+// Two-bobbin job sequence: wind bobbin A, wind a few slack turns in the gap,
+// pause for the operator to hand-hook the wire onto bobbin B, then wind
+// bobbin B (mirrored). Advanced automatically by pumpRotary() except the
+// AWAIT_HOOK -> BOBBIN_B step, which requires a Start button press.
+enum JobPhase { PHASE_BOBBIN_A, PHASE_SLACK, PHASE_AWAIT_HOOK, PHASE_BOBBIN_B, PHASE_DONE };
+JobPhase jobPhase = PHASE_BOBBIN_A;
 
 // Rotary drive state: IDLE (not moving) <-> RUNNING (spinning, button-started).
 // Stopping is instant (no decel ramp), so there's no transitional state.
@@ -251,6 +269,17 @@ double revolutionsWound() {
     return (double)myenc.read() / (RESOLUTION * 4.0);
 }
 
+// Redraws the normal running display (turn count / encoder count labels).
+// Used after home() and whenever a phase transition (e.g. resuming for
+// bobbin B) needs to replace a status message shown on the LCD.
+void drawNormalDisplay() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("N_Turns:             ");
+    lcd.setCursor(0, 1);
+    lcd.print("Count:               ");
+}
+
 // Halts the rotary drive immediately (no decel ramp) and disables the driver
 // so the shaft free-spins right away.
 void stopWinding() {
@@ -259,16 +288,40 @@ void stopWinding() {
     windingState = WIND_IDLE;
 }
 
-// Services the rotary drive's soft-start ramp and turn-count auto-stop.
-// Must be called every loop() iteration, and inside any blocking while-loop
+// Services the rotary drive's soft-start ramp and advances the two-bobbin
+// job through its phases as each phase's turn target is reached. Must be
+// called every loop() iteration, and inside any blocking while-loop
 // elsewhere (home()) — the STEP pulses themselves run in hardware regardless,
-// but this still needs to run regularly to advance the ramp and catch
-// WINDING_TARGET_TURNS in a timely fashion.
+// but this still needs to run regularly to advance the ramp and catch phase
+// boundaries in a timely fashion.
 void pumpRotary() {
     if (windingState != WIND_RUNNING) return;
 
-    if (revolutionsWound() >= WINDING_TARGET_TURNS) {
+    double turns = revolutionsWound();
+
+    if (jobPhase == PHASE_BOBBIN_A && turns >= TURNS_PER_BOBBIN) {
+        jobPhase = PHASE_SLACK;
+        LinearStepper.setAcceleration(LINEAR_ACCELERATION);
+        LinearStepper.moveTo(lround(GAP_POS_MM / LINEAR_RES));
+        printf("Phase: BOBBIN_A -> SLACK\n");
+    } else if (jobPhase == PHASE_SLACK && (turns - TURNS_PER_BOBBIN) >= SLACK_TURNS) {
+        jobPhase = PHASE_AWAIT_HOOK;
         stopWinding();
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Hook Bobbin B");
+        lcd.setCursor(0, 1);
+        lcd.print("Press Start");
+        printf("Phase: SLACK -> AWAIT_HOOK (hook wire onto bobbin B, then press Start)\n");
+        return;
+    } else if (jobPhase == PHASE_BOBBIN_B
+               && (turns - TURNS_PER_BOBBIN - SLACK_TURNS) >= TURNS_PER_BOBBIN) {
+        jobPhase = PHASE_DONE;
+        stopWinding();
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Winding Done");
+        printf("Phase: BOBBIN_B -> DONE\n");
         return;
     }
 
@@ -279,10 +332,21 @@ void pumpRotary() {
 // Starting ramps up smoothly; stopping is instant.
 void toggleWinding() {
     if (windingState == WIND_IDLE) {
+        if (jobPhase == PHASE_AWAIT_HOOK) {
+            // Beginning bobbin B: reset per-bobbin pass tracking so its own
+            // boundaries trigger fresh, and restore the normal display.
+            jobPhase = PHASE_BOBBIN_B;
+            atEndFlag = false;
+            lastHandledPassBoundary = -1;
+            drawNormalDisplay();
+        } else if (jobPhase == PHASE_DONE) {
+            printf("toggleWinding: job already complete, press Home to start a new one\n");
+            return;
+        }
         digitalWrite(ROTARY_EN_PIN, LOW);    // enable driver before commanding motion
         rotaryTimerStart();
         windingState = WIND_RUNNING;
-        printf("toggleWinding: IDLE -> RUNNING\n");
+        printf("toggleWinding: IDLE -> RUNNING (phase %d)\n", jobPhase);
     } else {
         stopWinding();
         printf("toggleWinding: RUNNING -> IDLE (instant stop)\n");
@@ -331,20 +395,15 @@ void home() {
     long startPositionSteps = lround(START_POS_MM / LINEAR_RES);
     LinearStepper.runToNewPosition(startPositionSteps);
 
-    issuedSteps = 0;
     targetSteps = 0;
-    jogOffset = 0;
     atEndFlag = false;
     lastHandledPassBoundary = -1;
+    jobPhase = PHASE_BOBBIN_A;
     myenc.write(0);
     prevPos = 0;
     LinearStepper.setCurrentPosition(0);    //Sets current position to position 0. Final Reference point.
 
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("N_Turns:             ");
-    lcd.setCursor(0, 1);
-    lcd.print("Count:               ");
+    drawNormalDisplay();
 }
 
 void handleBtnEvent(AceButton* button, uint8_t eventType, uint8_t /*buttonState*/) {
@@ -358,6 +417,63 @@ void handleBtnEvent(AceButton* button, uint8_t eventType, uint8_t /*buttonState*
             stopWinding();
         }
         home();
+    }
+}
+
+// Drives LinearStepper through one bobbin's back-and-forth winding pattern,
+// including the pass-boundary retract/pause. Shared by both bobbins:
+//   revolutionsSinceStart — turns elapsed since THIS bobbin's winding began
+//                           (bobbin A: revolutionsTotal; bobbin B: offset by
+//                           TURNS_PER_BOBBIN + SLACK_TURNS).
+//   positionOffsetSteps   — this bobbin's own zero reference along the
+//                           leadscrew (0 for bobbin A, BOBBIN_B_START_POS_MM
+//                           in steps for bobbin B).
+//   mirrored              — flips which local pass is "forward", for a
+//                           bobbin mounted the opposite way around.
+void driveBobbinPass(double revolutionsSinceStart, long positionOffsetSteps, bool mirrored) {
+    int localPass = (int)(revolutionsSinceStart / ROTATIONS_PER_LAYER);
+    double revolutionsInPass = revolutionsSinceStart - (localPass * ROTATIONS_PER_LAYER);
+    long stepsInPass = lround(revolutionsInPass * WIRE_DIAMETER / LINEAR_RES);
+    bool forwardPass = mirrored ? (localPass % 2 != 0) : (localPass % 2 == 0);
+
+    // At each pass boundary, pause the rotary drive itself (not just linear
+    // motion) so the bobbin holds still while the carriage retracts. This
+    // sidesteps racing the retract against a shrinking time window: winding
+    // simply doesn't advance until the carriage is back in position, so it's
+    // correct at any winding speed. Triggered once per distinct local pass
+    // number (not a revolutionsInPass threshold window) — pausing rotary
+    // freezes the encoder for the whole retract, so a live threshold would
+    // either get stepped over between loop() iterations, or re-fire
+    // repeatedly right after resuming since the encoder hasn't yet ticked
+    // past it.
+    if (!atEndFlag && localPass > 0 && localPass != lastHandledPassBoundary) {
+        atEndFlag = true;
+        lastHandledPassBoundary = localPass;
+        // Retract from the bobbin end while winding is held. Direction
+        // matches the pass just completed (same sign as forward travel).
+        int retractDir = forwardPass ? 1 : -1;
+        LinearStepper.setAcceleration((float)LINEAR_ACCELERATION * 4);
+        LinearStepper.move(retractDir * lround(END_JOG_MM / LINEAR_RES));
+        rotaryPauseSteps();
+    }
+
+    // Resume once the retract has actually finished.
+    if (atEndFlag && LinearStepper.distanceToGo() == 0) {
+        atEndFlag = false;
+        LinearStepper.setAcceleration(LINEAR_ACCELERATION);
+        rotaryResumeSteps();
+
+        long formulaTarget = forwardPass ? stepsInPass : (LAYER_STEPS - stepsInPass);
+
+        // Relabel the carriage's current (retracted) physical position as
+        // that target. No motion occurs — just a coordinate reset.
+        LinearStepper.setCurrentPosition(positionOffsetSteps + formulaTarget);
+    }
+
+    if (!atEndFlag) {
+        long localTarget = forwardPass ? stepsInPass : (LAYER_STEPS - stepsInPass);
+        targetSteps = localTarget;
+        LinearStepper.moveTo(positionOffsetSteps + localTarget);
     }
 }
 
@@ -423,8 +539,7 @@ void loop() {
 
     long newPos = myenc.read();
     double revolutionsTotal = (double)newPos / (RESOLUTION * 4.0); //Absolute Total Revolutions Completed
-    int passNumber = (int)(revolutionsTotal / ROTATIONS_PER_LAYER);  //Rounds Down Always. Begins at 0 (LtR)
-    double revolutionsInPass = revolutionsTotal - (passNumber * ROTATIONS_PER_LAYER);   //Relative Number of Revolutions in a Given Pass
+    int passNumber = (int)(revolutionsTotal / ROTATIONS_PER_LAYER);  //Rounds Down Always. Begins at 0 (LtR); telemetry only, driveBobbinPass() computes its own local pass number
 
     if (newPos != prevPos) {
         prevPos = newPos;
@@ -445,60 +560,13 @@ void loop() {
         }
     }
 
-    // Linear steps completed within the current pass
-    long stepsInPass = lround(revolutionsInPass * WIRE_DIAMETER / LINEAR_RES);
-
-    // At each pass boundary, pause the rotary drive itself (not just linear
-    // motion) so the bobbin holds still while the carriage retracts. This
-    // sidesteps racing the retract against a shrinking time window: winding
-    // simply doesn't advance until the carriage is back in position, so it's
-    // correct at any winding speed. Triggered once per distinct passNumber
-    // (not a revolutionsInPass threshold window) — pausing rotary freezes
-    // the encoder for the whole retract, so a live threshold would either
-    // get stepped over between loop() iterations, or re-fire repeatedly
-    // right after resuming since the encoder hasn't yet ticked past it.
-    if (!atEndFlag && passNumber > 0 && passNumber != lastHandledPassBoundary) {
-        atEndFlag = true;
-        lastHandledPassBoundary = passNumber;
-        // Retract from the bobbin end while winding is held.
-        // Direction is opposite to the pass just completed:
-        //   even pass = forward (dir 1), so retract backward (dir 0)
-        //   odd pass  = backward (dir 0), so retract forward (dir 1)
-        int retractDir = (passNumber % 2 == 0) ? 1 : -1;
-        // linearStepper.step(retractDir, lround(END_JOG_MM / LINEAR_RES));
-        LinearStepper.setAcceleration((float)LINEAR_ACCELERATION * 4);
-        LinearStepper.move(retractDir * lround(END_JOG_MM / LINEAR_RES));
-        rotaryPauseSteps();
-    }
-
-    // Resume once the retract has actually finished. Sync issuedSteps to the
-    // current encoder position so deltaSteps = 0 at the moment of
-    // resumption — no catch-up jump.
-    if (atEndFlag && LinearStepper.distanceToGo() == 0) {
-        atEndFlag = false;
-        LinearStepper.setAcceleration(LINEAR_ACCELERATION);
-        rotaryResumeSteps();
-
-        long formulaTarget;
-        if (passNumber % 2 == 0) {
-            formulaTarget = stepsInPass;
-        } else {
-            formulaTarget = LAYER_STEPS - stepsInPass;
-        }
-
-        // Relabel the carriage's current (retracted) physical position as that target,
-        // adjusted for any active jog offset. No motion occurs — just a coordinate reset.
-        LinearStepper.setCurrentPosition(formulaTarget + jogOffset);
-    }
-
-    if (!atEndFlag) {
-        // Even pass: traverse forward (LtR); odd pass: traverse in reverse (RtL)
-        if (passNumber % 2 == 0) {
-            targetSteps = stepsInPass;
-        } else {
-            targetSteps = (LAYER_STEPS - stepsInPass);
-        }
-
-        LinearStepper.moveTo(targetSteps + jogOffset);
+    // Drive whichever bobbin is currently active. PHASE_SLACK/AWAIT_HOOK/DONE
+    // need no per-loop linear tracking — the carriage just holds wherever it
+    // last was sent (the gap position, or its final position).
+    if (jobPhase == PHASE_BOBBIN_A) {
+        driveBobbinPass(revolutionsTotal, 0, false);
+    } else if (jobPhase == PHASE_BOBBIN_B) {
+        double revolutionsSinceBobbinB = revolutionsTotal - TURNS_PER_BOBBIN - SLACK_TURNS;
+        driveBobbinPass(revolutionsSinceBobbinB, lround(BOBBIN_B_START_POS_MM / LINEAR_RES), BOBBIN_B_MIRRORED);
     }
 }
